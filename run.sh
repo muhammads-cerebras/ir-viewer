@@ -9,6 +9,8 @@ if [[ ! -x "$UV_BIN" ]]; then
   echo "uv not found in workspace. Installing..."
   mkdir -p "$ROOT_DIR/.uv"
   curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR="$ROOT_DIR/.uv" sh
+else
+  echo "Using workspace uv at $UV_BIN"
 fi
 export PATH="$ROOT_DIR/.uv/bin:$PATH"
 
