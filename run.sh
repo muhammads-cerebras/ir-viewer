@@ -5,14 +5,20 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
 UV_BIN="$ROOT_DIR/.uv/bin/uv"
-if [[ ! -x "$UV_BIN" ]]; then
+UV_ALT="$ROOT_DIR/.uv/uv"
+if [[ ! -x "$UV_BIN" && ! -x "$UV_ALT" ]]; then
   echo "uv not found in workspace. Installing..."
   mkdir -p "$ROOT_DIR/.uv"
   curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR="$ROOT_DIR/.uv" sh
 else
-  echo "Using workspace uv at $UV_BIN"
+  if [[ -x "$UV_BIN" ]]; then
+    echo "Using workspace uv at $UV_BIN"
+  else
+    echo "Using workspace uv at $UV_ALT"
+    UV_BIN="$UV_ALT"
+  fi
 fi
-export PATH="$ROOT_DIR/.uv/bin:$PATH"
+export PATH="$ROOT_DIR/.uv/bin:$ROOT_DIR/.uv:$PATH"
 
 if [[ ! -d ".venv" ]]; then
   echo "Setting up environment (uv sync)..."
