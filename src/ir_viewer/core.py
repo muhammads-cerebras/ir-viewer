@@ -117,6 +117,7 @@ class RenderOptions:
     show_left_types: bool = True
     align_left_panel: bool = False
     show_left_loc: bool = True
+    wrap_left_panel: bool = True
 
 
 class DocumentView:

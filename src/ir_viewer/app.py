@@ -132,7 +132,7 @@ class IRViewerApp(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Horizontal(id="main"):
-            yield RichLog(id="list", auto_scroll=False, wrap=False)
+            yield RichLog(id="list", auto_scroll=False, wrap=True)
             yield RichLog(id="details", auto_scroll=False, wrap=True)
         yield Input(placeholder="/", id="search_bar")
         yield Footer()
@@ -143,7 +143,9 @@ class IRViewerApp(App):
         details = self.query_one("#details", RichLog)
         details.display = False
         details.can_focus = True
-        self.query_one("#list", RichLog).can_focus = True
+        list_view = self.query_one("#list", RichLog)
+        list_view.can_focus = True
+        list_view.wrap = self.options.wrap_left_panel
         if self._file_choices and len(self._file_choices) > 1 and not self.profile_mode:
             self.push_screen(
                 FileSelectScreen(self._file_choices, self._file_root),
@@ -761,8 +763,10 @@ class IRViewerApp(App):
         self.options.show_source_vars = values.get("show_source_vars", self.options.show_source_vars)
         self.options.show_full_source_vars = values.get("full_source_vars", self.options.show_full_source_vars)
         self.options.show_left_types = values.get("show_left_types", self.options.show_left_types)
+        self.options.wrap_left_panel = values.get("wrap_left_panel", self.options.wrap_left_panel)
         self.options.align_left_panel = values.get("align_left_panel", self.options.align_left_panel)
         self.options.show_left_loc = values.get("show_left_loc", self.options.show_left_loc)
+        self.query_one("#list", RichLog).wrap = self.options.wrap_left_panel
         self._render_list()
 
     def _apply_search(self, query: str | None) -> None:
@@ -1208,6 +1212,7 @@ class ToggleScreen(ModalScreen[dict[str, bool] | None]):
             yield Checkbox("Show source vars", value=self.options.show_source_vars, id="show_source_vars")
             yield Checkbox("Show full source vars", value=self.options.show_full_source_vars, id="full_source_vars")
             yield Checkbox("Show types", value=self.options.show_left_types, id="show_left_types")
+            yield Checkbox("Wrap left panel", value=self.options.wrap_left_panel, id="wrap_left_panel")
             yield Checkbox("Align columns", value=self.options.align_left_panel, id="align_left_panel")
             yield Checkbox("Show loc suffix", value=self.options.show_left_loc, id="show_left_loc")
             yield Label("Enter = apply, Esc = cancel")
@@ -1221,6 +1226,7 @@ class ToggleScreen(ModalScreen[dict[str, bool] | None]):
             "show_source_vars": self.query_one("#show_source_vars", Checkbox).value,
             "full_source_vars": self.query_one("#full_source_vars", Checkbox).value,
             "show_left_types": self.query_one("#show_left_types", Checkbox).value,
+            "wrap_left_panel": self.query_one("#wrap_left_panel", Checkbox).value,
             "align_left_panel": self.query_one("#align_left_panel", Checkbox).value,
             "show_left_loc": self.query_one("#show_left_loc", Checkbox).value,
         }
@@ -1515,6 +1521,7 @@ def main() -> None:
     parser.add_argument("--show-source-vars", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--show-full-source-vars", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--show-left-types", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--wrap-left-panel", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--align-left-panel", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--show-left-loc", action=argparse.BooleanOptionalAction, default=None)
     parsed = parser.parse_args()
@@ -1546,6 +1553,8 @@ def main() -> None:
         options.show_full_source_vars = parsed.show_full_source_vars
     if parsed.show_left_types is not None:
         options.show_left_types = parsed.show_left_types
+    if parsed.wrap_left_panel is not None:
+        options.wrap_left_panel = parsed.wrap_left_panel
     if parsed.align_left_panel is not None:
         options.align_left_panel = parsed.align_left_panel
     if parsed.show_left_loc is not None:
