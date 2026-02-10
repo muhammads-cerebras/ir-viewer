@@ -1073,6 +1073,11 @@ class FuncSelectScreen(ModalScreen[int]):
         index = getattr(item, "_jump_index", None)
         self.dismiss(index)
 
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "q":
+            self.app.exit()
+            event.stop()
+
 
 class ToggleScreen(ModalScreen[dict[str, bool] | None]):
     CSS = """
