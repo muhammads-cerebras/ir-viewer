@@ -1456,8 +1456,6 @@ def _alloc_suffix(extras: List[str]) -> str:
         suffixes.append("wgt")
     if "cachecontenttype" in extras_text or "kv_cache" in extras_text:
         suffixes.append("kv")
-    if "dummy" in extras_text:
-        suffixes.append("d")
     if not suffixes:
         return ""
     return "." + "".join(suffixes)
