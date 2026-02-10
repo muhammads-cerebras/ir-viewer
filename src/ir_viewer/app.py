@@ -425,6 +425,11 @@ class IRViewerApp(App):
                 inst_name = instruction.inst
                 if not self.options.show_full_prefix and inst_name.startswith(self.options.shorten_prefix):
                     inst_name = inst_name[len(self.options.shorten_prefix) :]
+                if instruction.attrs:
+                    for match in re.finditer(r"\bonX\b", label_string):
+                        label_text.stylize("green", match.start(), match.end())
+                    for match in re.finditer(r"\bonY\b", label_string):
+                        label_text.stylize("yellow", match.start(), match.end())
                 idx = label_string.find(inst_name)
                 if idx != -1:
                     label_text.stylize("bold cyan", idx, idx + len(inst_name))
@@ -1381,6 +1386,17 @@ def _clamp_window_start(index: int, total: int, window_size: int) -> int:
         return 0
     half = window_size // 2
     return max(0, min(index - half, total - window_size))
+
+
+def _onxy_prefix(attrs: str | None) -> str:
+    if not attrs:
+        return ""
+    prefixes: list[str] = []
+    if re.search(r"\bonX\b", attrs):
+        prefixes.append("onX")
+    if re.search(r"\bonY\b", attrs):
+        prefixes.append("onY")
+    return " ".join(prefixes) + " " if prefixes else ""
 
 
 def _default_ir_path() -> Path:

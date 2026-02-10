@@ -1341,6 +1341,7 @@ def _instruction_label(
         inst_name = f"{inst_name}.{op_suffix}"
     if not options.show_full_prefix and inst_name.startswith(options.shorten_prefix):
         inst_name = inst_name[len(options.shorten_prefix) :]
+    onxy_prefix = _onxy_prefix(instruction.attrs)
     operands_display = instruction.operands
     if const_value:
         operands_display = f"{operands_display} [{const_value}]".strip()
@@ -1367,9 +1368,9 @@ def _instruction_label(
         else:
             handle_prefix = ""
         if typed_outputs:
-            base = f"{handle_prefix}{typed_outputs} = {inst_name} {typed_inputs}".rstrip()
+            base = f"{handle_prefix}{onxy_prefix}{typed_outputs} = {inst_name} {typed_inputs}".rstrip()
         else:
-            base = f"{handle_prefix}{inst_name} {typed_inputs}".rstrip()
+            base = f"{handle_prefix}{onxy_prefix}{inst_name} {typed_inputs}".rstrip()
         return _append_source_vars(base, source_vars, show_source_vars, show_full_source_vars)
     if instruction.results:
         results = _split_values(instruction.results)
@@ -1387,9 +1388,9 @@ def _instruction_label(
         typed_operands = ", ".join(
             _format_typed_values(operands, arg_types, allocs, line_index, show_alloc_sizes, show_types, is_arg=True)
         )
-        base = f"{typed_results} = {inst_name} {typed_operands}".rstrip()
+        base = f"{onxy_prefix}{typed_results} = {inst_name} {typed_operands}".rstrip()
         return _append_source_vars(base, source_vars, show_source_vars, show_full_source_vars)
-    base = f"{inst_name} {operands_display}".rstrip()
+    base = f"{onxy_prefix}{inst_name} {operands_display}".rstrip()
     return _append_source_vars(base, source_vars, show_source_vars, show_full_source_vars)
 
 
@@ -1478,6 +1479,17 @@ def _append_source_vars(
     if not show_full:
         rendered = [var.split(" ← ", 1)[0] for var in source_vars]
     return f"{base} ⟨{', '.join(rendered)}⟩"
+
+
+def _onxy_prefix(attrs: Optional[str]) -> str:
+    if not attrs:
+        return ""
+    prefixes: List[str] = []
+    if re.search(r"\bonX\b", attrs):
+        prefixes.append("onX")
+    if re.search(r"\bonY\b", attrs):
+        prefixes.append("onY")
+    return " ".join(prefixes) + " " if prefixes else ""
 
 
 def _format_layout_section(
