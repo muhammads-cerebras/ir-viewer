@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import argparse
 import re
 import sys
 
@@ -85,10 +86,10 @@ class IRViewerApp(App):
         Binding("shift+tab", "toggle_focus", "Toggle focus"),
     ]
 
-    def __init__(self, path: Path, profile_mode: bool = False) -> None:
+    def __init__(self, path: Path, profile_mode: bool = False, options: RenderOptions | None = None) -> None:
         super().__init__()
         self.document = Document.from_path(path)
-        self.options = RenderOptions()
+        self.options = options or RenderOptions()
         self.view = DocumentView(self.document, self.options)
         self.profile_mode = profile_mode
         self.segment_index = 0
@@ -1414,12 +1415,44 @@ def _cursor_row(cursor_location) -> int:
 
 
 def main() -> None:
-    args = [arg for arg in sys.argv[1:] if arg != "--profile"]
-    profile_mode = "--profile" in sys.argv[1:]
-    path = Path(args[0]) if args else _default_ir_path()
+    parser = argparse.ArgumentParser(description="IR Viewer")
+    parser.add_argument("path", nargs="?", default=None, help="Path to IR file")
+    parser.add_argument("--profile", action="store_true", help="Run in headless profile mode")
+    parser.add_argument("--show-alloc-free", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--show-full-prefix", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--show-line-numbers", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--show-alloc-sizes", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--show-source-vars", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--show-full-source-vars", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--show-left-types", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--align-left-panel", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--show-left-loc", action=argparse.BooleanOptionalAction, default=None)
+    parsed = parser.parse_args()
+
+    profile_mode = parsed.profile
+    path = Path(parsed.path) if parsed.path else _default_ir_path()
     if not path.exists():
         raise SystemExit(f"IR file not found: {path}")
-    app = IRViewerApp(path, profile_mode=profile_mode)
+    options = RenderOptions()
+    if parsed.show_alloc_free is not None:
+        options.show_alloc_free = parsed.show_alloc_free
+    if parsed.show_full_prefix is not None:
+        options.show_full_prefix = parsed.show_full_prefix
+    if parsed.show_line_numbers is not None:
+        options.show_line_numbers = parsed.show_line_numbers
+    if parsed.show_alloc_sizes is not None:
+        options.show_alloc_sizes = parsed.show_alloc_sizes
+    if parsed.show_source_vars is not None:
+        options.show_source_vars = parsed.show_source_vars
+    if parsed.show_full_source_vars is not None:
+        options.show_full_source_vars = parsed.show_full_source_vars
+    if parsed.show_left_types is not None:
+        options.show_left_types = parsed.show_left_types
+    if parsed.align_left_panel is not None:
+        options.align_left_panel = parsed.align_left_panel
+    if parsed.show_left_loc is not None:
+        options.show_left_loc = parsed.show_left_loc
+    app = IRViewerApp(path, profile_mode=profile_mode, options=options)
     app.run(headless=profile_mode)
 
 
