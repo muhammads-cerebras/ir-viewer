@@ -1341,6 +1341,8 @@ def _instruction_label(
         inst_name = f"{inst_name}.{op_suffix}"
     if not options.show_full_prefix and inst_name.startswith(options.shorten_prefix):
         inst_name = inst_name[len(options.shorten_prefix) :]
+    if instruction.attrs and re.search(r"\bfirst_iteration_only\b", instruction.attrs):
+        inst_name = f"①{inst_name}"
     onxy_prefix = _onxy_prefix(instruction.attrs)
     operands_display = instruction.operands
     if const_value:
