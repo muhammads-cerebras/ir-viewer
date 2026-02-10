@@ -86,11 +86,20 @@ class IRViewerApp(App):
         Binding("shift+tab", "toggle_focus", "Toggle focus"),
     ]
 
-    def __init__(self, path: Path, profile_mode: bool = False, options: RenderOptions | None = None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        profile_mode: bool = False,
+        options: RenderOptions | None = None,
+        file_choices: list[Path] | None = None,
+        file_root: Path | None = None,
+    ) -> None:
         super().__init__()
-        self.document = Document.from_path(path)
         self.options = options or RenderOptions()
-        self.view = DocumentView(self.document, self.options)
+        self._file_choices = file_choices or []
+        self._file_root = file_root
+        self._current_path = path
+        self._load_path(path)
         self.profile_mode = profile_mode
         self.segment_index = 0
         self.selected_node = NodeData(kind="inst", source_index=0, attrs=None, value=None, layout_index=None)
@@ -135,6 +144,17 @@ class IRViewerApp(App):
         details.display = False
         details.can_focus = True
         self.query_one("#list", RichLog).can_focus = True
+        if self._file_choices and len(self._file_choices) > 1 and not self.profile_mode:
+            self.push_screen(
+                FileSelectScreen(self._file_choices, self._file_root),
+                self._select_file,
+            )
+            return
+        self._post_load_setup()
+        if self.profile_mode:
+            self.set_timer(0.05, self.exit)
+
+    def _post_load_setup(self) -> None:
         if self._ws_funcs:
             if len(self._ws_funcs) == 1:
                 self._active_func_index = 0
@@ -147,8 +167,13 @@ class IRViewerApp(App):
                     self.push_screen(FuncSelectScreen(self._ws_funcs), self._select_func)
         else:
             self._render_list()
-        if self.profile_mode:
-            self.set_timer(0.05, self.exit)
+
+    def _select_file(self, selection: int | None) -> None:
+        if selection is None:
+            return
+        path = self._file_choices[selection]
+        self._load_path(path)
+        self._post_load_setup()
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         return
@@ -706,6 +731,26 @@ class IRViewerApp(App):
         self.segment_index = 0
         self._render_list()
 
+    def _load_path(self, path: Path) -> None:
+        self._current_path = path
+        self.document = Document.from_path(path)
+        self.view = DocumentView(self.document, self.options)
+        self._ws_funcs = _collect_ws_funcs(self.document.lines)
+        self._active_func_index = None
+        self._container_by_line = _collect_host_container_by_line(self.document.lines)
+        self._def_container_by_line = {}
+        self._highlight_level1 = set()
+        self._highlight_level2 = set()
+        self._highlight_level3 = set()
+        self._label_cache = {}
+        self._flat_entries = []
+        self._selected_index = 0
+        self._window_start = 0
+        self._details_lines = []
+        self._details_matches = []
+        self._details_match_pos = -1
+        self.selected_node = NodeData(kind="inst", source_index=0, attrs=None, value=None, layout_index=None)
+
     def _apply_toggles(self, values: dict[str, bool] | None) -> None:
         if values is None:
             return
@@ -1085,6 +1130,51 @@ class FuncSelectScreen(ModalScreen[int]):
             event.stop()
 
 
+class FileSelectScreen(ModalScreen[int]):
+    CSS = """
+    FileSelectScreen {
+        align: center middle;
+    }
+
+    #file-pick {
+        width: 80%;
+        height: 80%;
+        border: round $accent;
+        padding: 1 2;
+        background: $surface;
+    }
+    """
+
+    def __init__(self, files: list[Path], root: Path | None) -> None:
+        super().__init__()
+        self.files = files
+        self.root = root
+
+    def compose(self) -> ComposeResult:
+        items: list[ListItem] = []
+        for idx, path in enumerate(self.files):
+            label = str(path)
+            if self.root:
+                try:
+                    label = str(path.relative_to(self.root))
+                except ValueError:
+                    label = str(path)
+            item = ListItem(Label(label))
+            item._file_index = idx  # type: ignore[attr-defined]
+            items.append(item)
+        yield ListView(*items, id="file-pick")
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        item = event.item
+        index = getattr(item, "_file_index", None)
+        self.dismiss(index)
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "q":
+            self.app.exit()
+            event.stop()
+
+
 class ToggleScreen(ModalScreen[dict[str, bool] | None]):
     CSS = """
     ToggleScreen {
@@ -1431,6 +1521,14 @@ def main() -> None:
 
     profile_mode = parsed.profile
     path = Path(parsed.path) if parsed.path else _default_ir_path()
+    file_choices: list[Path] = []
+    file_root: Path | None = None
+    if path.exists() and path.is_dir():
+        file_root = path
+        file_choices = sorted(path.glob("*.mlir"))
+        if not file_choices:
+            raise SystemExit(f"No .mlir files found in directory: {path}")
+        path = file_choices[0]
     if not path.exists():
         raise SystemExit(f"IR file not found: {path}")
     options = RenderOptions()
@@ -1452,7 +1550,13 @@ def main() -> None:
         options.align_left_panel = parsed.align_left_panel
     if parsed.show_left_loc is not None:
         options.show_left_loc = parsed.show_left_loc
-    app = IRViewerApp(path, profile_mode=profile_mode, options=options)
+    app = IRViewerApp(
+        path,
+        profile_mode=profile_mode,
+        options=options,
+        file_choices=file_choices,
+        file_root=file_root,
+    )
     app.run(headless=profile_mode)
 
 
