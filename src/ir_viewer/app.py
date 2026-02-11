@@ -486,6 +486,12 @@ class IRViewerApp(App):
                     label_text.stylize("green", match.start(), match.end())
                 for match in _SOURCE_VARS_RE.finditer(label_string):
                     label_text.stylize("violet", match.start(), match.end())
+                sem_value = _semaphore_value(instruction.attrs)
+                if sem_value:
+                    sem_text = f"→ ({sem_value} tx)"
+                    sem_idx = label_string.find(sem_text)
+                    if sem_idx != -1:
+                        label_text.stylize("dodger_blue1", sem_idx, sem_idx + len(sem_text))
                 self._label_cache[(source_index, label_string)] = label_text
         return label_text
 
@@ -1507,6 +1513,28 @@ def _onxy_prefix(attrs: str | None) -> str:
     if re.search(r"\bonY\b", attrs):
         prefixes.append("onY")
     return " ".join(prefixes) + " " if prefixes else ""
+
+
+def _semaphore_value(attrs: str | None) -> str | None:
+    if not attrs:
+        return None
+    match = re.search(r"\bsemaphore\s*=\s*([^,}]+)", attrs)
+    if not match:
+        return None
+    value = match.group(1).strip()
+    value = _strip_type_annotations(value)
+    if value.startswith('"') and value.endswith('"') and len(value) >= 2:
+        value = value[1:-1]
+    value = value.strip()
+    if not value:
+        return None
+    if _is_zero_literal(value):
+        return None
+    return value
+
+
+def _is_zero_literal(value: str) -> bool:
+    return re.fullmatch(r"0+(?:\.0+)?(?:e[+-]?0+)?", value, re.IGNORECASE) is not None
 
 
 def _default_ir_path() -> Path:

@@ -1344,6 +1344,9 @@ def _instruction_label(
         inst_name = inst_name[len(options.shorten_prefix) :]
     if not options.show_full_prefix:
         inst_name = re.sub(r"\bmaster_(tx|rx)\b", r"\1", inst_name)
+    semaphore_value = _semaphore_value(instruction.attrs)
+    if semaphore_value:
+        inst_name = f"{inst_name} → ({semaphore_value} tx)"
     iter_marker = ""
     if instruction.attrs and re.search(r"\bfirst_iteration_only\b", instruction.attrs):
         iter_marker = "➊ "
@@ -1494,6 +1497,28 @@ def _onxy_prefix(attrs: Optional[str]) -> str:
     if re.search(r"\bonY\b", attrs):
         prefixes.append("onY")
     return " ".join(prefixes) + " " if prefixes else ""
+
+
+def _semaphore_value(attrs: Optional[str]) -> Optional[str]:
+    if not attrs:
+        return None
+    match = re.search(r"\bsemaphore\s*=\s*([^,}]+)", attrs)
+    if not match:
+        return None
+    value = match.group(1).strip()
+    value = _strip_type_annotations(value)
+    if value.startswith('"') and value.endswith('"') and len(value) >= 2:
+        value = value[1:-1]
+    value = value.strip()
+    if not value:
+        return None
+    if _is_zero_literal(value):
+        return None
+    return value
+
+
+def _is_zero_literal(value: str) -> bool:
+    return re.fullmatch(r"0+(?:\.0+)?(?:e[+-]?0+)?", value, re.IGNORECASE) is not None
 
 
 def _format_layout_section(
