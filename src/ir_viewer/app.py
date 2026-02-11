@@ -458,6 +458,8 @@ class IRViewerApp(App):
                 inst_name = instruction.inst
                 if not self.options.show_full_prefix and inst_name.startswith(self.options.shorten_prefix):
                     inst_name = inst_name[len(self.options.shorten_prefix) :]
+                if not self.options.show_full_prefix:
+                    inst_name = re.sub(r"\bmaster_(tx|rx)\b", r"\1", inst_name)
                 if instruction.attrs:
                     for match in re.finditer(r"\bonX\b", label_string):
                         label_text.stylize("green", match.start(), match.end())

@@ -1342,6 +1342,8 @@ def _instruction_label(
         inst_name = f"{inst_name}.{op_suffix}"
     if not options.show_full_prefix and inst_name.startswith(options.shorten_prefix):
         inst_name = inst_name[len(options.shorten_prefix) :]
+    if not options.show_full_prefix:
+        inst_name = re.sub(r"\bmaster_(tx|rx)\b", r"\1", inst_name)
     iter_marker = ""
     if instruction.attrs and re.search(r"\bfirst_iteration_only\b", instruction.attrs):
         iter_marker = "➊ "
