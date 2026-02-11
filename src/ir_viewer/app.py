@@ -65,6 +65,8 @@ class IRViewerApp(App):
         Binding("H", "open_help", "Help"),
         Binding("n", "search_next", "Next match", show=False),
         Binding("N", "search_prev", "Prev match", show=False),
+        Binding("ctrl+c", "command_palette", "Command palette", show=False),
+        Binding("ctrl+p", "emacs_prev_line", "", show=False),
         Binding("up", "move_up", "Up", show=False),
         Binding("down", "move_down", "Down", show=False),
         Binding("pageup", "page_up", "Page up", show=False),
@@ -233,6 +235,9 @@ class IRViewerApp(App):
         else:
             self._move_selection(max(1, self._viewport_size() - 3))
 
+    def action_emacs_prev_line(self) -> None:
+        self.action_move_up()
+
     def action_scroll_left(self) -> None:
         self._scroll_horizontal(-4)
 
@@ -278,9 +283,29 @@ class IRViewerApp(App):
         self.push_screen(HelpScreen(self._help_items()))
 
     def _help_items(self) -> list[tuple[str, str]]:
-        items: list[tuple[str, str]] = []
-        for binding in self.BINDINGS:
-            items.append((binding.key, binding.description))
+        items: list[tuple[str, str]] = [
+            ("j / ↑ / C-p", "Move up"),
+            ("k / ↓ / C-n", "Move down"),
+            ("PgUp / C-u / M-v", "Page up"),
+            ("PgDn / C-d / C-v", "Page down"),
+            ("g / Home", "Go to top"),
+            ("G / End", "Go to bottom"),
+            ("h / C-b", "Scroll left"),
+            ("l / C-f", "Scroll right"),
+            ("0 / C-a", "Scroll leftmost"),
+            ("$ / C-e", "Scroll rightmost"),
+            ("Tab / Shift-Tab / C-o", "Toggle focus"),
+            ("/ / C-s", "Search"),
+            ("n", "Next match"),
+            ("N / C-r", "Prev match"),
+            ("?", "Attribute search"),
+            ("f", "Jump section"),
+            ("t", "Left panel toggles"),
+            ("i", "Toggle details panel"),
+            ("H", "Help"),
+            ("q", "Quit"),
+            ("Enter", "Select"),
+        ]
         return items
 
     def action_quit(self) -> None:
@@ -334,6 +359,24 @@ class IRViewerApp(App):
             event.stop()
             return
         if isinstance(self.focused, Input):
+            return
+        emacs_actions = {
+            "ctrl+n": self.action_move_down,
+            "ctrl+p": self.action_move_up,
+            "ctrl+v": self.action_page_down,
+            "alt+v": self.action_page_up,
+            "ctrl+f": self.action_scroll_right,
+            "ctrl+b": self.action_scroll_left,
+            "ctrl+a": self.action_scroll_leftmost,
+            "ctrl+e": self.action_scroll_rightmost,
+            "ctrl+s": self.action_open_search,
+            "ctrl+r": self.action_search_prev,
+            "ctrl+o": self.action_toggle_focus,
+        }
+        action = emacs_actions.get(event.key)
+        if action is not None:
+            action()
+            event.stop()
             return
         key_actions = {
             "up": self.action_move_up,
@@ -777,6 +820,7 @@ class IRViewerApp(App):
         self.options.show_full_source_vars = values.get("full_source_vars", self.options.show_full_source_vars)
         self.options.show_left_types = values.get("show_left_types", self.options.show_left_types)
         self.options.wrap_left_panel = values.get("wrap_left_panel", self.options.wrap_left_panel)
+        self.options.emacs_mode = values.get("emacs_mode", self.options.emacs_mode)
         self.options.align_left_panel = values.get("align_left_panel", self.options.align_left_panel)
         self.options.show_left_loc = values.get("show_left_loc", self.options.show_left_loc)
         self.query_one("#list", RichLog).wrap = self.options.wrap_left_panel
@@ -1226,6 +1270,7 @@ class ToggleScreen(ModalScreen[dict[str, bool] | None]):
             yield Checkbox("Show full source vars", value=self.options.show_full_source_vars, id="full_source_vars")
             yield Checkbox("Show types", value=self.options.show_left_types, id="show_left_types")
             yield Checkbox("Wrap left panel", value=self.options.wrap_left_panel, id="wrap_left_panel")
+            yield Checkbox("Emacs mode", value=self.options.emacs_mode, id="emacs_mode")
             yield Checkbox("Align columns", value=self.options.align_left_panel, id="align_left_panel")
             yield Checkbox("Show loc suffix", value=self.options.show_left_loc, id="show_left_loc")
             yield Label("Enter = apply, Esc = cancel")
@@ -1240,6 +1285,7 @@ class ToggleScreen(ModalScreen[dict[str, bool] | None]):
             "full_source_vars": self.query_one("#full_source_vars", Checkbox).value,
             "show_left_types": self.query_one("#show_left_types", Checkbox).value,
             "wrap_left_panel": self.query_one("#wrap_left_panel", Checkbox).value,
+            "emacs_mode": self.query_one("#emacs_mode", Checkbox).value,
             "align_left_panel": self.query_one("#align_left_panel", Checkbox).value,
             "show_left_loc": self.query_one("#show_left_loc", Checkbox).value,
         }
@@ -1563,6 +1609,7 @@ def main() -> None:
     parser.add_argument("--show-full-source-vars", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--show-left-types", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--wrap-left-panel", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--emacs-mode", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--align-left-panel", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--show-left-loc", action=argparse.BooleanOptionalAction, default=None)
     parsed = parser.parse_args()
@@ -1596,6 +1643,8 @@ def main() -> None:
         options.show_left_types = parsed.show_left_types
     if parsed.wrap_left_panel is not None:
         options.wrap_left_panel = parsed.wrap_left_panel
+    if parsed.emacs_mode is not None:
+        options.emacs_mode = parsed.emacs_mode
     if parsed.align_left_panel is not None:
         options.align_left_panel = parsed.align_left_panel
     if parsed.show_left_loc is not None:

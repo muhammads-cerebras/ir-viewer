@@ -118,6 +118,7 @@ class RenderOptions:
     align_left_panel: bool = False
     show_left_loc: bool = True
     wrap_left_panel: bool = True
+    emacs_mode: bool = False
 
 
 class DocumentView:
