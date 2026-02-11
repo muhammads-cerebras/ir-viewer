@@ -1342,8 +1342,9 @@ def _instruction_label(
         inst_name = f"{inst_name}.{op_suffix}"
     if not options.show_full_prefix and inst_name.startswith(options.shorten_prefix):
         inst_name = inst_name[len(options.shorten_prefix) :]
+    iter_marker = ""
     if instruction.attrs and re.search(r"\bfirst_iteration_only\b", instruction.attrs):
-        inst_name = f"①{inst_name}"
+        iter_marker = "➊ "
     onxy_prefix = _onxy_prefix(instruction.attrs)
     operands_display = instruction.operands
     if const_value:
@@ -1371,9 +1372,9 @@ def _instruction_label(
         else:
             handle_prefix = ""
         if typed_outputs:
-            base = f"{handle_prefix}{onxy_prefix}{typed_outputs} = {inst_name} {typed_inputs}".rstrip()
+            base = f"{iter_marker}{handle_prefix}{onxy_prefix}{typed_outputs} = {inst_name} {typed_inputs}".rstrip()
         else:
-            base = f"{handle_prefix}{onxy_prefix}{inst_name} {typed_inputs}".rstrip()
+            base = f"{iter_marker}{handle_prefix}{onxy_prefix}{inst_name} {typed_inputs}".rstrip()
         return _append_source_vars(base, source_vars, show_source_vars, show_full_source_vars)
     if instruction.results:
         results = _split_values(instruction.results)
@@ -1391,9 +1392,9 @@ def _instruction_label(
         typed_operands = ", ".join(
             _format_typed_values(operands, arg_types, allocs, line_index, show_alloc_sizes, show_types, is_arg=True)
         )
-        base = f"{onxy_prefix}{typed_results} = {inst_name} {typed_operands}".rstrip()
+        base = f"{iter_marker}{onxy_prefix}{typed_results} = {inst_name} {typed_operands}".rstrip()
         return _append_source_vars(base, source_vars, show_source_vars, show_full_source_vars)
-    base = f"{onxy_prefix}{inst_name} {operands_display}".rstrip()
+    base = f"{iter_marker}{onxy_prefix}{inst_name} {operands_display}".rstrip()
     return _append_source_vars(base, source_vars, show_source_vars, show_full_source_vars)
 
 

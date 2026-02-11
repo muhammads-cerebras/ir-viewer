@@ -192,6 +192,11 @@ class IRViewerApp(App):
     def action_toggle_details(self) -> None:
         details = self.query_one("#details", RichLog)
         details.display = not details.display
+        list_view = self.query_one("#list", RichLog)
+        list_view.wrap = self.options.wrap_left_panel
+        list_view.refresh(layout=True)
+        details.refresh(layout=True)
+        self.call_later(self._render_list)
         if not details.display:
             self._focus_target = "list"
             self.query_one("#list", RichLog).focus()
@@ -1338,6 +1343,12 @@ class HelpScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="help-panel"):
+            yield Label("Instruction format (left panel):")
+            yield Label("Prefix: ➊ (first iteration), [handle], onX/onY")
+            yield Label("Outputs: listed before '='")
+            yield Label("Inst: operation name (with optional .op suffix)")
+            yield Label("Inputs: listed after inst name")
+            yield Label("Source vars: ⟨...⟩ suffix when enabled")
             yield Label("Shortcuts")
             yield RichLog(id="help-log", wrap=True)
             yield Label("Esc = close")
