@@ -25,6 +25,7 @@ from .core import (
     _brace_delta,
     _split_top_level,
     _strip_type_annotations,
+    _op_attr_value,
 )
 
 
@@ -471,19 +472,27 @@ class IRViewerApp(App):
             self._flat_entries.append(self._build_line_entry(node, depth))
 
         self._apply_loc_suffixes()
+        self._apply_loc_groups()
 
         if self.options.align_left_panel:
             self._apply_alignment()
         else:
             for entry in self._flat_entries:
                 prefix = self._line_number_prefix(entry.node)
-                indent = self._indent_prefix(entry.depth)
-                label_string = f"{prefix}{indent}{entry.raw_label}"
+                group_marker = "│ " if entry.group_bar else ""
+                indent = self._indent_prefix(entry.depth + entry.group_level)
+                label_string = f"{prefix}{group_marker}{indent}{entry.raw_label}"
                 if entry.loc_suffix:
                     label_string = f"{label_string} ‹{entry.loc_suffix}›"
                 entry.text = self._styled_label_text(entry.node.kind, entry.node.source_index, label_string)
 
         self._rebuild_def_use_maps()
+        selected_index = 0
+        if self.selected_node and self.selected_node.source_index is not None:
+            for idx, entry in enumerate(self._flat_entries):
+                if entry.node.source_index == self.selected_node.source_index:
+                    selected_index = idx
+                    break
         self._set_selected_index(selected_index)
 
     def _update_details(self, node: NodeData) -> None:
@@ -504,7 +513,105 @@ class IRViewerApp(App):
         )
         return LineEntry(node=data, depth=depth, raw_label=node.label, text=Text(""))
 
+    def _apply_loc_groups(self) -> None:
+        if not self.options.show_left_loc or not self.options.group_loc_prefixes:
+            for entry in self._flat_entries:
+                entry.group_bar = False
+                entry.group_level = 0
+                entry.group_prefix = None
+                entry.group_chain = []
+            return
+        prefixes_by_entry: list[list[str]] = [
+            _loc_group_chain(
+                _group_loc_suffix(
+                    entry.loc_group_suffix,
+                    entry.loc_prefix_base,
+                    self._display_inst_name(entry.node.source_index) if entry.node.source_index is not None else None,
+                    self._display_inst_base_name(entry.node.source_index) if entry.node.source_index is not None else None,
+                )
+            )
+            if entry.node.kind == "inst" and entry.node.source_index is not None
+            else []
+            for entry in self._flat_entries
+        ]
+        max_level = max((len(p) for p in prefixes_by_entry), default=0)
+        level_enabled: list[set[int]] = [set() for _ in self._flat_entries]
+        for level in range(1, max_level + 1):
+            prefixes = [p[level - 1] if len(p) >= level else None for p in prefixes_by_entry]
+            idx = 0
+            while idx < len(prefixes):
+                current = prefixes[idx]
+                if current is None:
+                    idx += 1
+                    continue
+                end = idx + 1
+                while end < len(prefixes) and prefixes[end] == current:
+                    end += 1
+                if end - idx >= 2:
+                    for i in range(idx, end):
+                        level_enabled[i].add(level)
+                idx = end
+        child_map: dict[str, set[str]] = {}
+        for chain in prefixes_by_entry:
+            for idx, parent in enumerate(chain):
+                child = chain[idx + 1] if idx + 1 < len(chain) else "__leaf__"
+                child_map.setdefault(parent, set()).add(child)
+        prefixes_to_skip = {
+            parent
+            for parent, children in child_map.items()
+            if len(children) == 1 and "__leaf__" not in children
+        }
+
+        new_entries: list[LineEntry] = []
+        current_chain: list[str] = []
+        for entry, chain, enabled_levels in zip(self._flat_entries, prefixes_by_entry, level_enabled):
+            eligible_chain_raw = [chain[i - 1] for i in sorted(enabled_levels) if i - 1 < len(chain)]
+            eligible_chain = [p for p in eligible_chain_raw if p not in prefixes_to_skip]
+            common = 0
+            while common < len(current_chain) and common < len(eligible_chain) and current_chain[common] == eligible_chain[common]:
+                common += 1
+            current_chain = current_chain[:common]
+            last_emitted = current_chain[-1] if current_chain else ""
+            for prefix in eligible_chain[common:]:
+                level = len(current_chain)
+                current_chain.append(prefix)
+                if last_emitted and prefix.startswith(last_emitted + "."):
+                    label = prefix[len(last_emitted) + 1 :]
+                else:
+                    label = prefix
+                last_emitted = prefix
+                group_node = NodeData(kind="loc_group", source_index=None, attrs=None, value=None, layout_index=None)
+                group_entry = LineEntry(
+                    node=group_node,
+                    depth=entry.depth,
+                    raw_label=f"▸ {label}",
+                    text=Text(""),
+                    loc_suffix=None,
+                    group_bar=False,
+                    group_level=level,
+                    group_prefix=prefix,
+                )
+                new_entries.append(group_entry)
+            entry.group_bar = bool(eligible_chain)
+            entry.group_level = len(eligible_chain)
+            entry.group_chain = eligible_chain
+            if eligible_chain:
+                group_prefix = eligible_chain[-1]
+                base_prefix = entry.loc_prefix_base or ""
+                if base_prefix and group_prefix.startswith(base_prefix + "."):
+                    group_prefix = group_prefix[len(base_prefix) + 1 :]
+                entry.loc_suffix = _strip_group_prefix(entry.loc_suffix, group_prefix)
+                if entry.node.source_index is not None and entry.loc_suffix:
+                    if self._loc_suffix_matches_inst(entry.node.source_index, entry.loc_suffix):
+                        entry.loc_suffix = None
+            new_entries.append(entry)
+        self._flat_entries = new_entries
+
     def _styled_label_text(self, kind: str, source_index: int | None, label_string: str) -> Text:
+        if kind == "loc_group":
+            label_text = Text(label_string)
+            label_text.stylize("grey58", 0, len(label_text))
+            return label_text
         if kind == "inst" and source_index is not None:
             cache_key = (source_index, label_string)
             cached = self._label_cache.get(cache_key)
@@ -596,12 +703,13 @@ class IRViewerApp(App):
 
             for entry, parts in zip(entries, parts_list):
                 prefix = self._line_number_prefix(entry.node)
-                indent = self._indent_prefix(entry.depth)
+                group_marker = "│ " if entry.group_bar else ""
+                indent = self._indent_prefix(entry.depth + entry.group_level)
                 if not parts:
-                    label_string = f"{prefix}{indent}{entry.raw_label}"
+                    label_string = f"{prefix}{group_marker}{indent}{entry.raw_label}"
                     entry.text = self._styled_label_text(entry.node.kind, entry.node.source_index, label_string)
                     continue
-                label_string = self._aligned_label_string(parts, widths, prefix, indent, entry.loc_suffix)
+                label_string = self._aligned_label_string(parts, widths, f"{prefix}{group_marker}", indent, entry.loc_suffix)
                 entry.text = self._styled_label_text(entry.node.kind, entry.node.source_index, label_string)
 
     def _split_instruction_columns(self, label: str) -> dict[str, str] | None:
@@ -683,6 +791,8 @@ class IRViewerApp(App):
         if not self.options.show_left_loc:
             for entry in self._flat_entries:
                 entry.loc_suffix = None
+                entry.loc_group_suffix = None
+                entry.loc_prefix_base = None
             return
         loc_by_line: dict[int, str] = {}
         by_container: dict[str, list[str]] = {}
@@ -706,17 +816,29 @@ class IRViewerApp(App):
         for entry in self._flat_entries:
             if entry.node.source_index is None:
                 entry.loc_suffix = None
+                entry.loc_group_suffix = None
+                entry.loc_prefix_base = None
                 continue
             container_id = self._container_by_line.get(entry.node.source_index)
             if container_id is None:
                 entry.loc_suffix = None
+                entry.loc_group_suffix = None
+                entry.loc_prefix_base = None
                 continue
             loc_name = loc_by_line.get(entry.node.source_index)
             if not loc_name:
                 entry.loc_suffix = None
+                entry.loc_group_suffix = None
+                entry.loc_prefix_base = None
                 continue
             prefix = prefix_by_container.get(container_id, "")
-            entry.loc_suffix = _strip_prefix(loc_name, prefix)
+            suffix = _strip_prefix(loc_name, prefix)
+            if self._loc_suffix_matches_inst(entry.node.source_index, suffix):
+                entry.loc_suffix = None
+            else:
+                entry.loc_suffix = suffix
+            entry.loc_group_suffix = suffix
+            entry.loc_prefix_base = prefix
 
     def _loc_name_for_line(self, line_idx: int) -> str | None:
         line = self.document.lines[line_idx]
@@ -733,6 +855,37 @@ class IRViewerApp(App):
         first = full.split(",", 1)[0].strip()
         return first or None
 
+    def _loc_suffix_matches_inst(self, line_idx: int, loc_suffix: str) -> bool:
+        inst_name = self._display_inst_name(line_idx)
+        if not inst_name:
+            return False
+        return loc_suffix == inst_name
+
+    def _display_inst_name(self, line_idx: int) -> str | None:
+        instruction = self.view.instructions.get(line_idx)
+        if not instruction:
+            return None
+        inst_name = instruction.inst
+        op_suffix = _op_attr_value(instruction.attrs)
+        if op_suffix:
+            inst_name = f"{inst_name}.{op_suffix}"
+        if not self.options.show_full_prefix and inst_name.startswith(self.options.shorten_prefix):
+            inst_name = inst_name[len(self.options.shorten_prefix) :]
+        if not self.options.show_full_prefix:
+            inst_name = re.sub(r"\bmaster_(tx|rx)\b", r"\1", inst_name)
+        return inst_name
+
+    def _display_inst_base_name(self, line_idx: int) -> str | None:
+        instruction = self.view.instructions.get(line_idx)
+        if not instruction:
+            return None
+        inst_name = instruction.inst
+        if not self.options.show_full_prefix and inst_name.startswith(self.options.shorten_prefix):
+            inst_name = inst_name[len(self.options.shorten_prefix) :]
+        if not self.options.show_full_prefix:
+            inst_name = re.sub(r"\bmaster_(tx|rx)\b", r"\1", inst_name)
+        return inst_name
+
     def _viewport_size(self) -> int:
         list_log = self.query_one("#list", RichLog)
         height = list_log.size.height if list_log.is_attached else 40
@@ -743,12 +896,17 @@ class IRViewerApp(App):
         list_log.clear()
         if not self._flat_entries:
             return
+        selected_chain: set[str] = set()
+        if 0 <= self._selected_index < len(self._flat_entries):
+            selected_chain = set(self._flat_entries[self._selected_index].group_chain)
         window_size = self._viewport_size()
         self._window_start = _clamp_window_start(self._selected_index, len(self._flat_entries), window_size)
         end = min(len(self._flat_entries), self._window_start + window_size)
         for idx in range(self._window_start, end):
             entry = self._flat_entries[idx]
             line = entry.text.copy()
+            if entry.node.kind == "loc_group" and entry.group_prefix and entry.group_prefix in selected_chain:
+                line.stylize("on rgb(60,60,80)", 0, len(line))
             if entry.node.source_index in self._highlight_level1:
                 line.stylize("on rgb(100,170,100)", 0, len(line))
             elif entry.node.source_index in self._highlight_level2:
@@ -838,6 +996,7 @@ class IRViewerApp(App):
         self.options.show_left_types = values.get("show_left_types", self.options.show_left_types)
         self.options.wrap_left_panel = values.get("wrap_left_panel", self.options.wrap_left_panel)
         self.options.emacs_mode = values.get("emacs_mode", self.options.emacs_mode)
+        self.options.group_loc_prefixes = values.get("group_loc_prefixes", self.options.group_loc_prefixes)
         self.options.align_left_panel = values.get("align_left_panel", self.options.align_left_panel)
         self.options.show_left_loc = values.get("show_left_loc", self.options.show_left_loc)
         self.query_one("#list", RichLog).wrap = self.options.wrap_left_panel
@@ -1162,12 +1321,31 @@ class IRViewerApp(App):
 
 
 class LineEntry:
-    def __init__(self, node: NodeData, depth: int, raw_label: str, text: Text, loc_suffix: str | None = None) -> None:
+    def __init__(
+        self,
+        node: NodeData,
+        depth: int,
+        raw_label: str,
+        text: Text,
+        loc_suffix: str | None = None,
+        loc_group_suffix: str | None = None,
+        loc_prefix_base: str | None = None,
+        group_bar: bool = False,
+        group_level: int = 0,
+        group_prefix: str | None = None,
+        group_chain: list[str] | None = None,
+    ) -> None:
         self.node = node
         self.depth = depth
         self.raw_label = raw_label
         self.text = text
         self.loc_suffix = loc_suffix
+        self.loc_group_suffix = loc_group_suffix
+        self.loc_prefix_base = loc_prefix_base
+        self.group_bar = group_bar
+        self.group_level = group_level
+        self.group_prefix = group_prefix
+        self.group_chain = group_chain or []
 
 
 class FuncSelectScreen(ModalScreen[int]):
@@ -1288,6 +1466,7 @@ class ToggleScreen(ModalScreen[dict[str, bool] | None]):
             yield Checkbox("Show types", value=self.options.show_left_types, id="show_left_types")
             yield Checkbox("Wrap left panel", value=self.options.wrap_left_panel, id="wrap_left_panel")
             yield Checkbox("Emacs mode", value=self.options.emacs_mode, id="emacs_mode")
+            yield Checkbox("Group loc prefixes", value=self.options.group_loc_prefixes, id="group_loc_prefixes")
             yield Checkbox("Align columns", value=self.options.align_left_panel, id="align_left_panel")
             yield Checkbox("Show loc suffix", value=self.options.show_left_loc, id="show_left_loc")
             yield Label("Enter = apply, Esc = cancel")
@@ -1303,6 +1482,7 @@ class ToggleScreen(ModalScreen[dict[str, bool] | None]):
             "show_left_types": self.query_one("#show_left_types", Checkbox).value,
             "wrap_left_panel": self.query_one("#wrap_left_panel", Checkbox).value,
             "emacs_mode": self.query_one("#emacs_mode", Checkbox).value,
+            "group_loc_prefixes": self.query_one("#group_loc_prefixes", Checkbox).value,
             "align_left_panel": self.query_one("#align_left_panel", Checkbox).value,
             "show_left_loc": self.query_one("#show_left_loc", Checkbox).value,
         }
@@ -1520,6 +1700,79 @@ def _strip_prefix(value: str, prefix: str) -> str:
     return value.lstrip(":/.")
 
 
+def _loc_group_prefix(loc_suffix: str | None) -> str | None:
+    if not loc_suffix:
+        return None
+    if "." not in loc_suffix:
+        return None
+    return loc_suffix.rsplit(".", 1)[0] or None
+
+
+def _loc_parts(loc_suffix: str | None) -> list[str]:
+    if not loc_suffix:
+        return []
+    return [p for p in loc_suffix.split(".") if p]
+
+
+def _loc_group_chain(loc_suffix: str | None) -> list[str]:
+    parts = _loc_parts(loc_suffix)
+    if not parts:
+        return []
+    prefixes: list[str] = []
+    for idx in range(1, len(parts) + 1):
+        prefixes.append(".".join(parts[:idx]))
+    return prefixes
+
+
+def _strip_group_prefix(loc_suffix: str | None, prefix: str) -> str | None:
+    if not loc_suffix:
+        return None
+    if loc_suffix == prefix:
+        return ""
+    if loc_suffix.startswith(prefix + "."):
+        return loc_suffix[len(prefix) + 1 :]
+    return loc_suffix
+
+
+def _strip_loc_op_suffix(
+    loc_suffix: str | None,
+    inst_name: str | None,
+    inst_base_name: str | None = None,
+) -> str | None:
+    if not loc_suffix:
+        return loc_suffix
+    loc_parts = _loc_parts(loc_suffix)
+    if not loc_parts:
+        return loc_suffix
+    loc_last = loc_parts[-1]
+    inst_last = inst_name.split(".")[-1] if inst_name else None
+    base_last = inst_base_name.split(".")[-1] if inst_base_name else None
+    if loc_last not in {inst_last, base_last}:
+        return loc_suffix
+    trimmed = loc_parts[:-1]
+    return ".".join(trimmed) if trimmed else ""
+
+
+def _group_loc_suffix(
+    suffix: str | None,
+    base_prefix: str | None,
+    inst_name: str | None,
+    inst_base_name: str | None = None,
+) -> str | None:
+    if suffix is None:
+        if base_prefix:
+            return base_prefix
+        return None
+    stripped = _strip_loc_op_suffix(suffix, inst_name, inst_base_name)
+    if stripped is None:
+        return None
+    parts = _loc_parts(stripped)
+    base = base_prefix or ""
+    if base and len(parts) <= 1:
+        return f"{base}.{stripped}" if stripped else base
+    return stripped
+
+
 def _parse_attrs_flat(attrs: str) -> dict[str, str | None]:
     text = attrs.strip()
     if text.startswith("{") and text.endswith("}"):
@@ -1627,6 +1880,7 @@ def main() -> None:
     parser.add_argument("--show-left-types", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--wrap-left-panel", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--emacs-mode", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--group-loc-prefixes", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--align-left-panel", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--show-left-loc", action=argparse.BooleanOptionalAction, default=None)
     parsed = parser.parse_args()
@@ -1662,6 +1916,8 @@ def main() -> None:
         options.wrap_left_panel = parsed.wrap_left_panel
     if parsed.emacs_mode is not None:
         options.emacs_mode = parsed.emacs_mode
+    if parsed.group_loc_prefixes is not None:
+        options.group_loc_prefixes = parsed.group_loc_prefixes
     if parsed.align_left_panel is not None:
         options.align_left_panel = parsed.align_left_panel
     if parsed.show_left_loc is not None:
