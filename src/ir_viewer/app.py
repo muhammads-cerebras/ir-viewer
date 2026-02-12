@@ -27,6 +27,7 @@ from .core import (
     _strip_type_annotations,
     _op_attr_value,
     _semaphore_value,
+    _num_rx_value,
 )
 
 
@@ -663,6 +664,12 @@ class IRViewerApp(App):
                     sem_idx = label_string.find(sem_text)
                     if sem_idx != -1:
                         label_text.stylize("dodger_blue1", sem_idx, sem_idx + len(sem_text))
+                num_rx_value = _num_rx_value(instruction.attrs)
+                if num_rx_value:
+                    rx_text = f"→ ({num_rx_value} rx)"
+                    rx_idx = label_string.find(rx_text)
+                    if rx_idx != -1:
+                        label_text.stylize("yellow", rx_idx, rx_idx + len(rx_text))
                 self._label_cache[(source_index, label_string)] = label_text
         return label_text
 

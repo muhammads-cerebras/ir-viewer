@@ -1349,6 +1349,9 @@ def _instruction_label(
     semaphore_value = _semaphore_value(instruction.attrs)
     if semaphore_value:
         inst_name = f"{inst_name} → ({semaphore_value} tx)"
+    num_rx_value = _num_rx_value(instruction.attrs)
+    if num_rx_value:
+        inst_name = f"{inst_name} → ({num_rx_value} rx)"
     iter_marker = ""
     if instruction.attrs and re.search(r"\bfirst_iteration_only\b", instruction.attrs):
         iter_marker = "➊ "
@@ -1505,6 +1508,24 @@ def _semaphore_value(attrs: Optional[str]) -> Optional[str]:
     if not attrs:
         return None
     match = re.search(r"\bsemaphore\s*=\s*([^,}]+)", attrs)
+    if not match:
+        return None
+    value = match.group(1).strip()
+    value = _strip_type_annotations(value)
+    if value.startswith('"') and value.endswith('"') and len(value) >= 2:
+        value = value[1:-1]
+    value = value.strip()
+    if not value:
+        return None
+    if _is_zero_literal(value):
+        return None
+    return value
+
+
+def _num_rx_value(attrs: Optional[str]) -> Optional[str]:
+    if not attrs:
+        return None
+    match = re.search(r"\bnum_rx\s*=\s*([^,}]+)", attrs)
     if not match:
         return None
     value = match.group(1).strip()
