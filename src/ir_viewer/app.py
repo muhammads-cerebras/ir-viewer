@@ -60,6 +60,7 @@ class IRViewerApp(App):
         Binding("i", "toggle_details", "Toggle details panel"),
         Binding("f", "open_jump", "Jump section"),
         Binding("t", "open_toggles", "Left panel toggles"),
+        Binding("w", "toggle_left_wrap", "Toggle left wrap"),
         Binding("/", "open_search", "Search"),
         Binding("?", "open_attr_search", "Attr search"),
         Binding("H", "open_help", "Help"),
@@ -204,6 +205,13 @@ class IRViewerApp(App):
         if not details.display:
             self._focus_target = "list"
             self.query_one("#list", RichLog).focus()
+
+    def action_toggle_left_wrap(self) -> None:
+        self.options.wrap_left_panel = not self.options.wrap_left_panel
+        list_view = self.query_one("#list", RichLog)
+        list_view.wrap = self.options.wrap_left_panel
+        list_view.refresh(layout=True)
+        self.call_after_refresh(self._render_list)
 
     def on_resize(self, event: events.Resize) -> None:
         list_view = self.query_one("#list", RichLog)
