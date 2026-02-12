@@ -980,7 +980,7 @@ class IRViewerApp(App):
 
     def _compute_semaphore_unblocks(self) -> None:
         self._semaphore_unblocker_by_tx = {}
-        queue: list[tuple[int, int]] = []
+        queues: dict[str | None, list[tuple[int, int]]] = {"X": [], "Y": [], None: []}
         for entry in self._flat_entries:
             if entry.node.kind != "inst" or entry.node.source_index is None:
                 continue
@@ -988,11 +988,13 @@ class IRViewerApp(App):
             instruction = self.view.instructions.get(line_idx)
             if not instruction:
                 continue
+            axis = _axis_from_attrs(instruction.attrs)
             sem_value = _semaphore_value(instruction.attrs)
             count = _parse_semaphore_count(sem_value)
             if count and count > 0:
-                queue.append((line_idx, count))
+                queues[axis].append((line_idx, count))
             if self._is_tx_instruction(instruction):
+                queue = queues[axis]
                 if queue:
                     head_line, remaining = queue[0]
                     self._semaphore_unblocker_by_tx[line_idx] = head_line
@@ -1845,6 +1847,18 @@ def _group_loc_suffix(
     if base and len(parts) <= 1:
         return f"{base}.{stripped}" if stripped else base
     return stripped
+
+
+def _axis_from_attrs(attrs: str | None) -> str | None:
+    if not attrs:
+        return None
+    has_x = re.search(r"\bonX\b", attrs) is not None
+    has_y = re.search(r"\bonY\b", attrs) is not None
+    if has_x and not has_y:
+        return "X"
+    if has_y and not has_x:
+        return "Y"
+    return None
 
 
 def _parse_attrs_flat(attrs: str) -> dict[str, str | None]:
