@@ -969,7 +969,7 @@ class IRViewerApp(App):
 
     def _is_tx_instruction(self, instruction) -> bool:
         name = instruction.inst.split(".")[-1]
-        return name in {"tx", "txact", "request_txact", "master_tx"}
+        return name in {"tx", "txact", "request_txact", "master_tx", "slave_reconfig"}
 
     def _compute_semaphore_unblocks(self) -> None:
         self._semaphore_unblocker_by_tx = {}
