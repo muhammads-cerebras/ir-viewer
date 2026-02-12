@@ -26,6 +26,7 @@ from .core import (
     _split_top_level,
     _strip_type_annotations,
     _op_attr_value,
+    _semaphore_value,
 )
 
 
@@ -120,6 +121,8 @@ class IRViewerApp(App):
         self._highlight_level1: set[int] = set()
         self._highlight_level2: set[int] = set()
         self._highlight_level3: set[int] = set()
+        self._semaphore_unblocker_by_tx: dict[int, int] = {}
+        self._highlight_semaphore: int | None = None
         self._label_cache: dict[tuple[int, str], Text] = {}
         self._flat_entries: list[LineEntry] = []
         self._selected_index = 0
@@ -473,6 +476,7 @@ class IRViewerApp(App):
 
         self._apply_loc_suffixes()
         self._apply_loc_groups()
+        self._compute_semaphore_unblocks()
 
         if self.options.align_left_panel:
             self._apply_alignment()
@@ -913,6 +917,8 @@ class IRViewerApp(App):
                 line.stylize("on rgb(70,120,70)", 0, len(line))
             elif entry.node.source_index in self._highlight_level3:
                 line.stylize("on rgb(50,85,50)", 0, len(line))
+            if entry.node.source_index == self._highlight_semaphore:
+                line.stylize("on rgb(90,70,120)", 0, len(line))
             for match in re.finditer(r"‹[^›]+›", line.plain):
                 line.stylize("light_green", match.start(), match.end())
             if idx == self._selected_index:
@@ -936,10 +942,21 @@ class IRViewerApp(App):
         if apply_highlights:
             self._update_related_highlights(entry.node)
         else:
+            prev_semaphore = self._highlight_semaphore
+            if entry.node.kind == "inst" and entry.node.source_index is not None:
+                self._highlight_semaphore = self._semaphore_unblocker_by_tx.get(entry.node.source_index)
+            else:
+                self._highlight_semaphore = None
             if self._highlight_level1 or self._highlight_level2 or self._highlight_level3:
                 self._highlight_level1 = set()
                 self._highlight_level2 = set()
                 self._highlight_level3 = set()
+            if (
+                prev_semaphore != self._highlight_semaphore
+                or self._highlight_level1
+                or self._highlight_level2
+                or self._highlight_level3
+            ):
                 self._render_viewport()
 
     def _move_selection(self, delta: int) -> None:
@@ -949,6 +966,34 @@ class IRViewerApp(App):
         if self._select_timer is not None:
             self._select_timer.stop()
         self._select_timer = self.set_timer(0.15, self._apply_selection)
+
+    def _is_tx_instruction(self, instruction) -> bool:
+        name = instruction.inst.split(".")[-1]
+        return name in {"tx", "txact", "request_txact", "master_tx"}
+
+    def _compute_semaphore_unblocks(self) -> None:
+        self._semaphore_unblocker_by_tx = {}
+        queue: list[tuple[int, int]] = []
+        for entry in self._flat_entries:
+            if entry.node.kind != "inst" or entry.node.source_index is None:
+                continue
+            line_idx = entry.node.source_index
+            instruction = self.view.instructions.get(line_idx)
+            if not instruction:
+                continue
+            sem_value = _semaphore_value(instruction.attrs)
+            count = _parse_semaphore_count(sem_value)
+            if count and count > 0:
+                queue.append((line_idx, count))
+            if self._is_tx_instruction(instruction):
+                if queue:
+                    head_line, remaining = queue[0]
+                    self._semaphore_unblocker_by_tx[line_idx] = head_line
+                    remaining -= 1
+                    if remaining <= 0:
+                        queue.pop(0)
+                    else:
+                        queue[0] = (head_line, remaining)
 
 
     def _jump_to_index(self, index: int | None) -> None:
@@ -975,6 +1020,8 @@ class IRViewerApp(App):
         self._highlight_level1 = set()
         self._highlight_level2 = set()
         self._highlight_level3 = set()
+        self._semaphore_unblocker_by_tx = {}
+        self._highlight_semaphore = None
         self._label_cache = {}
         self._flat_entries = []
         self._selected_index = 0
@@ -1226,6 +1273,7 @@ class IRViewerApp(App):
             self._highlight_level1 = set()
             self._highlight_level2 = set()
             self._highlight_level3 = set()
+            self._highlight_semaphore = None
             self._render_viewport()
             return
         instruction = self.view.instructions.get(node.source_index)
@@ -1233,8 +1281,10 @@ class IRViewerApp(App):
             self._highlight_level1 = set()
             self._highlight_level2 = set()
             self._highlight_level3 = set()
+            self._highlight_semaphore = None
             self._render_viewport()
             return
+        self._highlight_semaphore = self._semaphore_unblocker_by_tx.get(node.source_index)
         defs, uses = self._instruction_defs_uses(instruction)
         container_id = self._container_by_line.get(node.source_index)
 
@@ -1722,6 +1772,23 @@ def _loc_group_chain(loc_suffix: str | None) -> list[str]:
     for idx in range(1, len(parts) + 1):
         prefixes.append(".".join(parts[:idx]))
     return prefixes
+
+
+def _parse_semaphore_count(value: str | None) -> int | None:
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if re.fullmatch(r"-?\d+", value):
+        return int(value)
+    try:
+        as_float = float(value)
+    except ValueError:
+        return None
+    if as_float.is_integer():
+        return int(as_float)
+    return None
 
 
 def _strip_group_prefix(loc_suffix: str | None, prefix: str) -> str | None:
