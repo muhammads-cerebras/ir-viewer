@@ -130,6 +130,7 @@ class IRViewerApp(App):
         self._details_match_pos: int = -1
         self._focus_target: str = "list"
         self._last_attr_search: tuple[str, str | None] | None = None
+        self._last_list_width: int | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -148,6 +149,7 @@ class IRViewerApp(App):
         list_view = self.query_one("#list", RichLog)
         list_view.can_focus = True
         list_view.wrap = self.options.wrap_left_panel
+        self._last_list_width = list_view.size.width
         if self._file_choices and len(self._file_choices) > 1 and not self.profile_mode:
             self.push_screen(
                 FileSelectScreen(self._file_choices, self._file_root),
@@ -198,10 +200,17 @@ class IRViewerApp(App):
         list_view.wrap = self.options.wrap_left_panel
         list_view.refresh(layout=True)
         details.refresh(layout=True)
-        self.call_later(self._render_list)
+        self.call_after_refresh(self._render_list)
         if not details.display:
             self._focus_target = "list"
             self.query_one("#list", RichLog).focus()
+
+    def on_resize(self, event: events.Resize) -> None:
+        list_view = self.query_one("#list", RichLog)
+        width = list_view.size.width
+        if self._last_list_width != width:
+            self._last_list_width = width
+            self.call_after_refresh(self._render_list)
 
     def action_next_segment(self) -> None:
         self.segment_index = (self.segment_index + 1) % 3
