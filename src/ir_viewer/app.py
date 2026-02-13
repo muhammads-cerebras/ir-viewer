@@ -762,8 +762,21 @@ class IRViewerApp(App):
                     inst_tail = instruction.inst.split(".")[-1]
                     if (
                         op_value
-                        and op_value.startswith("slave")
+                        and (op_value.startswith("slave") or op_value.startswith("switchroot"))
                         and not op_value.startswith("slaveCacheStore")
+                        and inst_tail in {
+                        "tx",
+                        "txact",
+                        "request_txact",
+                        "master_tx",
+                        }
+                    ):
+                        num_rx_value = "1"
+                    elif (
+                        op_value
+                        and not op_value.startswith("slave")
+                        and not op_value.startswith("switchroot")
+                        and not op_value.startswith("none")
                         and inst_tail in {
                         "tx",
                         "txact",
