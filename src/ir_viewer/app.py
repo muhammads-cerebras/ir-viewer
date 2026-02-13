@@ -1683,26 +1683,32 @@ class ToggleScreen(ModalScreen[dict[str, bool] | None]):
         Binding("escape", "cancel", "Cancel"),
     ]
 
+    _TOGGLE_ITEMS: list[tuple[str, str, str, str]] = [
+        ("a", "Show alloc/free", "show_alloc_free", "alloc_free"),
+        ("b", "Show full prefix", "show_full_prefix", "full_prefix"),
+        ("c", "Show line numbers", "show_line_numbers", "line_numbers"),
+        ("d", "Show alloc sizes", "show_alloc_sizes", "alloc_sizes"),
+        ("e", "Show source vars", "show_source_vars", "show_source_vars"),
+        ("f", "Show full source vars", "show_full_source_vars", "full_source_vars"),
+        ("g", "Show types", "show_left_types", "show_left_types"),
+        ("h", "Group loc prefixes", "group_loc_prefixes", "group_loc_prefixes"),
+        ("i", "Show only tx/rx", "show_only_tx_rx", "show_only_tx_rx"),
+        ("j", "Align columns", "align_left_panel", "align_left_panel"),
+        ("k", "Show loc suffix", "show_left_loc", "show_left_loc"),
+    ]
+
     def __init__(self, options: RenderOptions) -> None:
         super().__init__()
         self.options = options
+        self._toggle_key_to_id = {key: checkbox_id for key, _, _, checkbox_id in self._TOGGLE_ITEMS}
 
     def compose(self) -> ComposeResult:
         with Vertical(id="toggle-panel"):
             yield Label("Left panel options")
-            yield Checkbox("Show alloc/free", value=self.options.show_alloc_free, id="alloc_free")
-            yield Checkbox("Show full prefix", value=self.options.show_full_prefix, id="full_prefix")
-            yield Checkbox("Show line numbers", value=self.options.show_line_numbers, id="line_numbers")
-            yield Checkbox("Show alloc sizes", value=self.options.show_alloc_sizes, id="alloc_sizes")
-            yield Checkbox("Show source vars", value=self.options.show_source_vars, id="show_source_vars")
-            yield Checkbox("Show full source vars", value=self.options.show_full_source_vars, id="full_source_vars")
-            yield Checkbox("Show types", value=self.options.show_left_types, id="show_left_types")
-            yield Checkbox("Wrap left panel", value=self.options.wrap_left_panel, id="wrap_left_panel")
-            yield Checkbox("Emacs mode", value=self.options.emacs_mode, id="emacs_mode")
-            yield Checkbox("Group loc prefixes", value=self.options.group_loc_prefixes, id="group_loc_prefixes")
-            yield Checkbox("Show only tx/rx", value=self.options.show_only_tx_rx, id="show_only_tx_rx")
-            yield Checkbox("Align columns", value=self.options.align_left_panel, id="align_left_panel")
-            yield Checkbox("Show loc suffix", value=self.options.show_left_loc, id="show_left_loc")
+            for key, label, option_attr, checkbox_id in self._TOGGLE_ITEMS:
+                value = getattr(self.options, option_attr)
+                yield Checkbox(f"({key}) {label}", value=value, id=checkbox_id)
+            yield Label("Shortcuts: press the letter in parentheses to toggle")
             yield Label("Enter = apply, Esc = cancel")
 
     def action_apply(self) -> None:
@@ -1714,8 +1720,6 @@ class ToggleScreen(ModalScreen[dict[str, bool] | None]):
             "show_source_vars": self.query_one("#show_source_vars", Checkbox).value,
             "full_source_vars": self.query_one("#full_source_vars", Checkbox).value,
             "show_left_types": self.query_one("#show_left_types", Checkbox).value,
-            "wrap_left_panel": self.query_one("#wrap_left_panel", Checkbox).value,
-            "emacs_mode": self.query_one("#emacs_mode", Checkbox).value,
             "group_loc_prefixes": self.query_one("#group_loc_prefixes", Checkbox).value,
             "show_only_tx_rx": self.query_one("#show_only_tx_rx", Checkbox).value,
             "align_left_panel": self.query_one("#align_left_panel", Checkbox).value,
@@ -1733,6 +1737,13 @@ class ToggleScreen(ModalScreen[dict[str, bool] | None]):
         elif event.key == "escape":
             self.action_cancel()
             event.stop()
+        else:
+            key = event.key.lower()
+            item_id = self._toggle_key_to_id.get(key)
+            if item_id:
+                checkbox = self.query_one(f"#{item_id}", Checkbox)
+                checkbox.value = not checkbox.value
+                event.stop()
 
 
 class AttrSearchScreen(ModalScreen[dict[str, str | None] | None]):
@@ -2143,7 +2154,6 @@ def main() -> None:
     parser.add_argument("--show-full-source-vars", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--show-left-types", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--wrap-left-panel", action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument("--emacs-mode", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--group-loc-prefixes", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--align-left-panel", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--show-left-loc", action=argparse.BooleanOptionalAction, default=None)
@@ -2178,8 +2188,6 @@ def main() -> None:
         options.show_left_types = parsed.show_left_types
     if parsed.wrap_left_panel is not None:
         options.wrap_left_panel = parsed.wrap_left_panel
-    if parsed.emacs_mode is not None:
-        options.emacs_mode = parsed.emacs_mode
     if parsed.group_loc_prefixes is not None:
         options.group_loc_prefixes = parsed.group_loc_prefixes
     if parsed.align_left_panel is not None:
