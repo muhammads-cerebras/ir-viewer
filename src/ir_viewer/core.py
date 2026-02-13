@@ -120,6 +120,7 @@ class RenderOptions:
     wrap_left_panel: bool = True
     emacs_mode: bool = False
     group_loc_prefixes: bool = False
+    show_only_tx_rx: bool = False
 
 
 class DocumentView:
@@ -1350,6 +1351,34 @@ def _instruction_label(
     if semaphore_value:
         inst_name = f"{inst_name} → ({semaphore_value} tx)"
     num_rx_value = _num_rx_value(instruction.attrs)
+    if not num_rx_value:
+        op_value = _op_attr_value(instruction.attrs)
+        inst_tail = instruction.inst.split(".")[-1]
+        if (
+            op_value
+            and (op_value.startswith("slave") or op_value.startswith("switchroot"))
+            and not op_value.startswith("slaveCacheStore")
+            and inst_tail in {
+            "tx",
+            "txact",
+            "request_txact",
+            "master_tx",
+            }
+        ):
+            num_rx_value = "1"
+        elif (
+            op_value
+            and not op_value.startswith("slave")
+            and not op_value.startswith("switchroot")
+            and not op_value.startswith("none")
+            and inst_tail in {
+            "tx",
+            "txact",
+            "request_txact",
+            "master_tx",
+            }
+        ):
+            num_rx_value = "1"
     if num_rx_value:
         inst_name = f"{inst_name} → ({num_rx_value} rx)"
     iter_marker = ""
