@@ -132,6 +132,7 @@ class RenderOptions:
     emacs_mode: bool = False
     group_loc_prefixes: bool = False
     show_only_tx_rx: bool = False
+    split_axis_view: bool = False
 
 
 class DocumentView:

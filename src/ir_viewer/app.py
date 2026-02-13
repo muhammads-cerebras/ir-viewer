@@ -30,6 +30,7 @@ from .core import (
     _num_rx_value,
     _instruction_label,
     _highlight_details,
+    _axis_from_attrs,
 )
 
 
@@ -141,6 +142,7 @@ class IRViewerApp(App):
         self._focus_target: str = "list"
         self._last_attr_search: tuple[str, str | None] | None = None
         self._last_list_width: int | None = None
+        self._split_focus_side: str = "left"
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -158,7 +160,7 @@ class IRViewerApp(App):
         details.can_focus = True
         list_view = self.query_one("#list", RichLog)
         list_view.can_focus = True
-        list_view.wrap = self.options.wrap_left_panel
+        list_view.wrap = False if self.options.split_axis_view else self.options.wrap_left_panel
         self._last_list_width = list_view.size.width
         if self._file_choices and len(self._file_choices) > 1 and not self.profile_mode:
             self.push_screen(
@@ -385,6 +387,18 @@ class IRViewerApp(App):
             event.stop()
             return
         if isinstance(self.focused, Input):
+            return
+        if (
+            self.options.split_axis_view
+            and self._focus_target == "list"
+            and event.key in {"left", "right", "space"}
+        ):
+            if event.key == "space":
+                next_side = "right" if self._split_focus_side == "left" else "left"
+                self._switch_split_focus_side(next_side)
+            else:
+                self._switch_split_focus_side("left" if event.key == "left" else "right")
+            event.stop()
             return
         emacs_actions = {
             "ctrl+n": self.action_move_down,
@@ -1066,7 +1080,162 @@ class IRViewerApp(App):
         height = list_log.size.height if list_log.is_attached else 40
         return max(10, height - 2)
 
+    def _styled_entry_line(self, entry: LineEntry, selected_chain: set[str]) -> Text:
+        line = entry.text.copy()
+        if entry.node.kind == "loc_group" and entry.group_prefix and entry.group_prefix in selected_chain:
+            line.stylize("on rgb(60,60,80)", 0, len(line))
+        if entry.node.source_index in self._highlight_level1:
+            line.stylize("on rgb(100,170,100)", 0, len(line))
+        elif entry.node.source_index in self._highlight_level2:
+            line.stylize("on rgb(70,120,70)", 0, len(line))
+        elif entry.node.source_index in self._highlight_level3:
+            line.stylize("on rgb(50,85,50)", 0, len(line))
+        if entry.node.source_index == self._highlight_semaphore:
+            line.stylize("on rgb(130,50,130)", 0, len(line))
+        if entry.node.source_index == self._highlight_num_rx:
+            line.stylize("on rgb(120,95,60)", 0, len(line))
+        if entry.node.source_index in self._highlight_semaphore_consumers:
+            line.stylize("on rgb(50,95,150)", 0, len(line))
+        if entry.node.source_index in self._highlight_num_rx_consumers:
+            line.stylize("on rgb(160,130,50)", 0, len(line))
+        for match in re.finditer(r"‹[^›]+›", line.plain):
+            line.stylize("light_green", match.start(), match.end())
+        return line
+
+    def _entry_axis_side(self, entry: LineEntry) -> str:
+        if entry.node.kind == "inst" and entry.node.source_index is not None:
+            instruction = self.view.instructions.get(entry.node.source_index)
+            axis = _axis_from_attrs(instruction.attrs) if instruction else None
+            if axis == "X":
+                return "left"
+            return "right"
+        return "left"
+
+    def _pad_cell(self, cell: Text, width: int) -> Text:
+        padded = cell.copy()
+        if len(padded.plain) > width:
+            padded.truncate(width)
+        pad_len = width - len(padded.plain)
+        if pad_len > 0:
+            padded.append(" " * pad_len)
+        return padded
+
+    def _split_view_visible(self, entry: LineEntry) -> bool:
+        if entry.node.kind != "inst" or entry.node.source_index is None:
+            return False
+        instruction = self.view.instructions.get(entry.node.source_index)
+        if not instruction:
+            return False
+        inst_tail = instruction.inst.split(".")[-1]
+        return inst_tail in {"master_tx", "master_rx", "slave_reconfig"}
+
+    def _compute_split_rows(self) -> tuple[list[int], dict[int, dict[str, int]]]:
+        row_for_entry: list[int] = [-1] * len(self._flat_entries)
+        row_for_source: dict[int, int] = {}
+        row_to_entries: dict[int, dict[str, int]] = {}
+        last_row_left = -1
+        last_row_right = -1
+        for idx, entry in enumerate(self._flat_entries):
+            if not self._split_view_visible(entry):
+                continue
+            side = self._entry_axis_side(entry)
+            min_row = (last_row_left + 1) if side == "left" else (last_row_right + 1)
+            if entry.node.kind == "inst" and entry.node.source_index is not None:
+                instruction = self.view.instructions.get(entry.node.source_index)
+                if instruction:
+                    for pred in (instruction.semaphore_unblocker, instruction.num_rx_unblocker):
+                        if pred is None:
+                            continue
+                        pred_row = row_for_source.get(pred)
+                        if pred_row is not None:
+                            min_row = max(min_row, pred_row + 1)
+            row_for_entry[idx] = min_row
+            row_to_entries.setdefault(min_row, {})[side] = idx
+            if entry.node.kind == "inst" and entry.node.source_index is not None:
+                row_for_source[entry.node.source_index] = min_row
+            if side == "left":
+                last_row_left = min_row
+            else:
+                last_row_right = min_row
+        return row_for_entry, row_to_entries
+
+    def _switch_split_focus_side(self, side: str) -> None:
+        if side not in {"left", "right"}:
+            return
+        if not self._flat_entries:
+            return
+        self._split_focus_side = side
+        row_for_entry, row_to_entries = self._compute_split_rows()
+        if not row_to_entries:
+            return
+        current_row = row_for_entry[self._selected_index] if row_for_entry else -1
+        if current_row < 0:
+            current_row = min(row_to_entries.keys(), default=0)
+        entry_map = row_to_entries.get(current_row, {})
+        target_idx = entry_map.get(side)
+        if target_idx is None:
+            # Find nearest row with an entry on this side
+            rows = sorted(row_to_entries.keys())
+            for row in rows:
+                if row >= current_row and side in row_to_entries[row]:
+                    target_idx = row_to_entries[row][side]
+                    break
+            if target_idx is None:
+                for row in reversed(rows):
+                    if row < current_row and side in row_to_entries[row]:
+                        target_idx = row_to_entries[row][side]
+                        break
+        if target_idx is not None:
+            self._set_selected_index(target_idx)
+
+    def _render_viewport_split(self) -> None:
+        list_log = self.query_one("#list", RichLog)
+        list_log.clear()
+        if not self._flat_entries:
+            return
+        selected_chain: set[str] = set()
+        if 0 <= self._selected_index < len(self._flat_entries):
+            selected_chain = set(self._flat_entries[self._selected_index].group_chain)
+        row_for_entry, row_to_entries = self._compute_split_rows()
+        selected_row = row_for_entry[self._selected_index] if row_for_entry else 0
+        if selected_row < 0:
+            selected_row = min(row_to_entries.keys(), default=0)
+        selected_entry = row_to_entries.get(selected_row, {}).get(self._split_focus_side)
+        if selected_entry is None:
+            other_side = "right" if self._split_focus_side == "left" else "left"
+            selected_entry = row_to_entries.get(selected_row, {}).get(other_side)
+        window_size = self._viewport_size()
+        max_row = max(row_to_entries.keys(), default=0)
+        self._window_start = _clamp_window_start(selected_row, max_row + 1, window_size)
+        end = min(max_row + 1, self._window_start + window_size)
+        list_width = list_log.size.width if list_log.is_attached else 120
+        sep = " │ "
+        col_width = max(10, (list_width - len(sep)) // 2)
+        for row in range(self._window_start, end):
+            entry_map = row_to_entries.get(row, {})
+            left_cell = Text("")
+            right_cell = Text("")
+            left_idx = entry_map.get("left")
+            right_idx = entry_map.get("right")
+            if left_idx is not None:
+                left_cell = self._styled_entry_line(self._flat_entries[left_idx], selected_chain)
+            if right_idx is not None:
+                right_cell = self._styled_entry_line(self._flat_entries[right_idx], selected_chain)
+            left_cell = self._pad_cell(left_cell, col_width)
+            right_cell = self._pad_cell(right_cell, col_width)
+            line = Text.assemble(left_cell, sep, right_cell)
+            if row == selected_row and selected_entry is not None:
+                if selected_entry == left_idx:
+                    line.stylize("reverse", 0, col_width)
+                elif selected_entry == right_idx:
+                    start = col_width + len(sep)
+                    line.stylize("reverse", start, start + col_width)
+            list_log.write(line)
+
     def _render_viewport(self) -> None:
+        if self.options.split_axis_view:
+            self._render_viewport_split()
+            return
         list_log = self.query_one("#list", RichLog)
         list_log.clear()
         if not self._flat_entries:
@@ -1079,25 +1248,7 @@ class IRViewerApp(App):
         end = min(len(self._flat_entries), self._window_start + window_size)
         for idx in range(self._window_start, end):
             entry = self._flat_entries[idx]
-            line = entry.text.copy()
-            if entry.node.kind == "loc_group" and entry.group_prefix and entry.group_prefix in selected_chain:
-                line.stylize("on rgb(60,60,80)", 0, len(line))
-            if entry.node.source_index in self._highlight_level1:
-                line.stylize("on rgb(100,170,100)", 0, len(line))
-            elif entry.node.source_index in self._highlight_level2:
-                line.stylize("on rgb(70,120,70)", 0, len(line))
-            elif entry.node.source_index in self._highlight_level3:
-                line.stylize("on rgb(50,85,50)", 0, len(line))
-            if entry.node.source_index == self._highlight_semaphore:
-                line.stylize("on rgb(130,50,130)", 0, len(line))
-            if entry.node.source_index == self._highlight_num_rx:
-                line.stylize("on rgb(120,95,60)", 0, len(line))
-            if entry.node.source_index in self._highlight_semaphore_consumers:
-                line.stylize("on rgb(50,95,150)", 0, len(line))
-            if entry.node.source_index in self._highlight_num_rx_consumers:
-                line.stylize("on rgb(160,130,50)", 0, len(line))
-            for match in re.finditer(r"‹[^›]+›", line.plain):
-                line.stylize("light_green", match.start(), match.end())
+            line = self._styled_entry_line(entry, selected_chain)
             if idx == self._selected_index:
                 line.stylize("reverse", 0, len(line))
             list_log.write(line)
@@ -1156,6 +1307,28 @@ class IRViewerApp(App):
                 self._render_viewport()
 
     def _move_selection(self, delta: int) -> None:
+        if not self._flat_entries:
+            return
+        if self.options.split_axis_view:
+            row_for_entry, row_to_entries = self._compute_split_rows()
+            if not row_for_entry:
+                return
+            current_row = row_for_entry[self._selected_index]
+            if current_row < 0:
+                current_row = min(row_to_entries.keys(), default=0)
+            max_row = max(row_to_entries.keys(), default=current_row)
+            target_row = max(0, min(max_row, current_row + delta))
+            if target_row == current_row:
+                return
+            entry_map = row_to_entries.get(target_row, {})
+            target_idx = entry_map.get(self._split_focus_side)
+            if target_idx is None:
+                other_side = "right" if self._split_focus_side == "left" else "left"
+                target_idx = entry_map.get(other_side)
+            if target_idx is None:
+                return
+            self._set_selected_index(target_idx)
+            return
         self._set_selected_index(self._selected_index + delta)
 
     def _schedule_apply_selection(self) -> None:
@@ -1220,7 +1393,9 @@ class IRViewerApp(App):
         self.options.align_left_panel = values.get("align_left_panel", self.options.align_left_panel)
         self.options.show_left_loc = values.get("show_left_loc", self.options.show_left_loc)
         self.options.show_only_tx_rx = values.get("show_only_tx_rx", self.options.show_only_tx_rx)
-        self.query_one("#list", RichLog).wrap = self.options.wrap_left_panel
+        self.options.split_axis_view = values.get("split_axis_view", self.options.split_axis_view)
+        list_view = self.query_one("#list", RichLog)
+        list_view.wrap = False if self.options.split_axis_view else self.options.wrap_left_panel
         self._render_list()
 
     def _apply_search(self, query: str | None) -> None:
@@ -1697,6 +1872,7 @@ class ToggleScreen(ModalScreen[dict[str, bool] | None]):
         ("i", "Show only tx/rx", "show_only_tx_rx", "show_only_tx_rx"),
         ("j", "Align columns", "align_left_panel", "align_left_panel"),
         ("k", "Show loc suffix", "show_left_loc", "show_left_loc"),
+        ("l", "Split axis view", "split_axis_view", "split_axis_view"),
     ]
 
     def __init__(self, options: RenderOptions) -> None:
@@ -1726,6 +1902,7 @@ class ToggleScreen(ModalScreen[dict[str, bool] | None]):
             "show_only_tx_rx": self.query_one("#show_only_tx_rx", Checkbox).value,
             "align_left_panel": self.query_one("#align_left_panel", Checkbox).value,
             "show_left_loc": self.query_one("#show_left_loc", Checkbox).value,
+            "split_axis_view": self.query_one("#split_axis_view", Checkbox).value,
         }
         self.dismiss(values)
 
