@@ -1638,16 +1638,18 @@ class FileSelectScreen(ModalScreen[int]):
         super().__init__()
         self.files = files
         self.root = root
+        self._resolved_root = root.resolve() if root else None
 
     def compose(self) -> ComposeResult:
         items: list[ListItem] = []
         for idx, path in enumerate(self.files):
-            label = str(path)
-            if self.root:
+            resolved_path = path.resolve()
+            label = str(resolved_path)
+            if self._resolved_root:
                 try:
-                    label = str(path.relative_to(self.root))
+                    label = str(resolved_path.relative_to(self._resolved_root))
                 except ValueError:
-                    label = str(path)
+                    label = str(resolved_path)
             item = ListItem(Label(label))
             item._file_index = idx  # type: ignore[attr-defined]
             items.append(item)
