@@ -124,12 +124,8 @@ class IRViewerApp(App):
         self._highlight_level1: set[int] = set()
         self._highlight_level2: set[int] = set()
         self._highlight_level3: set[int] = set()
-        self._semaphore_unblocker_by_tx: dict[int, int] = {}
         self._highlight_semaphore: int | None = None
-        self._num_rx_unblocker_by_rx: dict[int, int] = {}
         self._highlight_num_rx: int | None = None
-        self._semaphore_consumers_by_source: dict[int, list[int]] = {}
-        self._num_rx_consumers_by_source: dict[int, list[int]] = {}
         self._highlight_semaphore_consumers: set[int] = set()
         self._highlight_num_rx_consumers: set[int] = set()
         self._label_cache: dict[tuple[int, str], Text] = {}
@@ -485,7 +481,7 @@ class IRViewerApp(App):
 
         self._apply_loc_suffixes()
         self._apply_loc_groups()
-        self._compute_semaphore_unblocks()
+        self.view._ensure_semaphore_relationships()
 
         if self.options.align_left_panel:
             self._apply_alignment()
@@ -515,40 +511,42 @@ class IRViewerApp(App):
         text = rendered if isinstance(rendered, Text) else Text(str(rendered))
         if node.kind == "inst" and node.source_index is not None:
             extra_lines: list[str] = []
-            sem_source = self._semaphore_unblocker_by_tx.get(node.source_index)
-            if sem_source is not None:
-                inst = self.view.instructions.get(sem_source)
-                if inst:
-                    label = _instruction_label(
-                        inst,
-                        self.options,
-                        self.document.allocs,
-                        sem_source,
-                        self.options.show_alloc_sizes,
-                        self.options.show_left_types,
-                        self.view.ws_rt_io,
-                        None,
-                        self.options.show_source_vars,
-                        False,
-                    )
-                    extra_lines.append(f"Semaphore source: {label}")
-            num_rx_source = self._num_rx_unblocker_by_rx.get(node.source_index)
-            if num_rx_source is not None:
-                inst = self.view.instructions.get(num_rx_source)
-                if inst:
-                    label = _instruction_label(
-                        inst,
-                        self.options,
-                        self.document.allocs,
-                        num_rx_source,
-                        self.options.show_alloc_sizes,
-                        self.options.show_left_types,
-                        self.view.ws_rt_io,
-                        None,
-                        self.options.show_source_vars,
-                        False,
-                    )
-                    extra_lines.append(f"num_rx source: {label}")
+            instruction = self.view.instructions.get(node.source_index)
+            if instruction:
+                sem_source = instruction.semaphore_unblocker
+                if sem_source is not None:
+                    inst = self.view.instructions.get(sem_source)
+                    if inst:
+                        label = _instruction_label(
+                            inst,
+                            self.options,
+                            self.document.allocs,
+                            sem_source,
+                            self.options.show_alloc_sizes,
+                            self.options.show_left_types,
+                            self.view.ws_rt_io,
+                            None,
+                            self.options.show_source_vars,
+                            False,
+                        )
+                        extra_lines.append(f"Semaphore source: {label}")
+                num_rx_source = instruction.num_rx_unblocker
+                if num_rx_source is not None:
+                    inst = self.view.instructions.get(num_rx_source)
+                    if inst:
+                        label = _instruction_label(
+                            inst,
+                            self.options,
+                            self.document.allocs,
+                            num_rx_source,
+                            self.options.show_alloc_sizes,
+                            self.options.show_left_types,
+                            self.view.ws_rt_io,
+                            None,
+                            self.options.show_source_vars,
+                            False,
+                        )
+                        extra_lines.append(f"num_rx source: {label}")
             if extra_lines:
                 lines = text.plain.splitlines()
                 insert_at = 3 if len(lines) >= 3 else len(lines)
@@ -785,8 +783,8 @@ class IRViewerApp(App):
                         # Check if this instruction consumes semaphore or num_rx
                         is_producer = (sem_count and sem_count > 0) or (num_rx_count and num_rx_count > 0)
                         is_consumer = (
-                            node.source_index in self._semaphore_unblocker_by_tx
-                            or node.source_index in self._num_rx_unblocker_by_rx
+                            instruction.semaphore_unblocker is not None
+                            or instruction.num_rx_unblocker is not None
                         )
                         
                         if not (is_producer or is_consumer):
@@ -1069,14 +1067,17 @@ class IRViewerApp(App):
             prev_sem_consumers = set(self._highlight_semaphore_consumers)
             prev_num_rx_consumers = set(self._highlight_num_rx_consumers)
             if entry.node.kind == "inst" and entry.node.source_index is not None:
-                self._highlight_semaphore = self._semaphore_unblocker_by_tx.get(entry.node.source_index)
-                self._highlight_num_rx = self._num_rx_unblocker_by_rx.get(entry.node.source_index)
-                self._highlight_semaphore_consumers = set(
-                    self._semaphore_consumers_by_source.get(entry.node.source_index, [])
-                )
-                self._highlight_num_rx_consumers = set(
-                    self._num_rx_consumers_by_source.get(entry.node.source_index, [])
-                )
+                instruction = self.view.instructions.get(entry.node.source_index)
+                if instruction:
+                    self._highlight_semaphore = instruction.semaphore_unblocker
+                    self._highlight_num_rx = instruction.num_rx_unblocker
+                    self._highlight_semaphore_consumers = set(instruction.semaphore_consumers)
+                    self._highlight_num_rx_consumers = set(instruction.num_rx_consumers)
+                else:
+                    self._highlight_semaphore = None
+                    self._highlight_num_rx = None
+                    self._highlight_semaphore_consumers = set()
+                    self._highlight_num_rx_consumers = set()
             else:
                 self._highlight_semaphore = None
                 self._highlight_num_rx = None
@@ -1104,158 +1105,6 @@ class IRViewerApp(App):
         if self._select_timer is not None:
             self._select_timer.stop()
         self._select_timer = self.set_timer(0.15, self._apply_selection)
-
-    def _is_tx_instruction(self, instruction) -> bool:
-        name = instruction.inst.split(".")[-1]
-        return name in {"tx", "txact", "request_txact", "master_tx", "slave_reconfig"}
-
-    def _is_rx_consumer(self, instruction) -> bool:
-        name = instruction.inst.split(".")[-1]
-        if name not in {"rx", "rxact", "request_rxact", "master_rx"}:
-            return False
-        op_value = _op_attr_value(instruction.attrs)
-        # rx is a consumer if it's slave OR if it's non-slave, non-none
-        if op_value:
-            return not op_value.startswith("none")
-        return False
-
-    def _num_rx_queue_axis(self, consumer_axis: str | None) -> str | None:
-        if consumer_axis == "X":
-            return "Y"
-        if consumer_axis == "Y":
-            return "X"
-        return None
-
-    def _compute_semaphore_unblocks(self) -> None:
-        self._semaphore_unblocker_by_tx = {}
-        queues: dict[str | None, list[tuple[int, int]]] = {"X": [], "Y": [], None: []}
-        # Separate queues: same-axis consumed on same axis, opposite-axis consumed on opposite axis
-        num_rx_queues_same: dict[str | None, list[tuple[int, int]]] = {"X": [], "Y": [], None: []}
-        num_rx_queues_opposite: dict[str | None, list[tuple[int, int]]] = {"X": [], "Y": [], None: []}
-        self._num_rx_unblocker_by_rx = {}
-        self._semaphore_consumers_by_source = {}
-        self._num_rx_consumers_by_source = {}
-        for entry in self._flat_entries:
-            if entry.node.kind != "inst" or entry.node.source_index is None:
-                continue
-            line_idx = entry.node.source_index
-            instruction = self.view.instructions.get(line_idx)
-            if not instruction:
-                continue
-            axis = _axis_from_attrs(instruction.attrs)
-            sem_value = _semaphore_value(instruction.attrs)
-            count = _parse_semaphore_count(sem_value)
-            if count and count > 0:
-                queues[axis].append((line_idx, count))
-            num_rx_value = _num_rx_value(instruction.attrs)
-            num_rx_count = _parse_semaphore_count(num_rx_value)
-            is_slave_tx = False
-            is_other_tx = False
-            if not num_rx_count:
-                op_value = _op_attr_value(instruction.attrs)
-                inst_tail = instruction.inst.split(".")[-1]
-                if (
-                    op_value
-                    and (op_value.startswith("slave") or op_value.startswith("switchroot"))
-                    and not op_value.startswith("slaveCacheStore")
-                    and inst_tail in {
-                    "tx",
-                    "txact",
-                    "request_txact",
-                    "master_tx",
-                    }
-                ):
-                    num_rx_count = 1
-                    is_slave_tx = True
-                elif (
-                    op_value
-                    and not op_value.startswith("slave")
-                    and not op_value.startswith("switchroot")
-                    and not op_value.startswith("none")
-                    and inst_tail in {
-                    "tx",
-                    "txact",
-                    "request_txact",
-                    "master_tx",
-                    }
-                ):
-                    num_rx_count = 1
-                    is_other_tx = True
-            if num_rx_count and num_rx_count > 0:
-                # Slave tx ops go to opposite-axis queue, others go to same-axis queue
-                if is_slave_tx:
-                    num_rx_queues_opposite[axis].append((line_idx, num_rx_count))
-                elif is_other_tx:
-                    num_rx_queues_same[axis].append((line_idx, num_rx_count))
-                else:
-                    # Explicit num_rx - check if it's slave or not
-                    op_value = _op_attr_value(instruction.attrs)
-                    if op_value and op_value.startswith("slave"):
-                        num_rx_queues_opposite[axis].append((line_idx, num_rx_count))
-                    else:
-                        num_rx_queues_same[axis].append((line_idx, num_rx_count))
-            if self._is_tx_instruction(instruction):
-                queue = queues[axis]
-                if queue:
-                    head_line, remaining = queue[0]
-                    self._semaphore_unblocker_by_tx[line_idx] = head_line
-                    self._semaphore_consumers_by_source.setdefault(head_line, []).append(line_idx)
-                    remaining -= 1
-                    if remaining <= 0:
-                        queue.pop(0)
-                    else:
-                        queue[0] = (head_line, remaining)
-            if self._is_rx_consumer(instruction):
-                consumer_axis = _axis_from_attrs(instruction.attrs)
-                consumer_op = _op_attr_value(instruction.attrs)
-                
-                # Determine which queue to consume from based on rx op
-                is_opposite_axis_rx = consumer_op and (consumer_op.startswith("slave") or consumer_op.startswith("switchroot"))
-                
-                if is_opposite_axis_rx:
-                    # Slave/switchroot rx consumes from opposite-axis queue
-                    queue_axes: list[str | None] = []
-                    if consumer_axis in {"X", "Y"}:
-                        opposite = self._num_rx_queue_axis(consumer_axis)
-                        queue_axes = [opposite, None] if opposite else [None]
-                    else:
-                        queue_axes = ["X", "Y", None]
-                    
-                    for axis_key in queue_axes:
-                        queue = num_rx_queues_opposite[axis_key]
-                        if not queue:
-                            continue
-                        head_line, remaining = queue[0]
-                        self._num_rx_unblocker_by_rx[line_idx] = head_line
-                        self._num_rx_consumers_by_source.setdefault(head_line, []).append(line_idx)
-                        remaining -= 1
-                        if remaining <= 0:
-                            queue.pop(0)
-                        else:
-                            queue[0] = (head_line, remaining)
-                        break
-                else:
-                    # Non-slave, non-none rx consumes from same-axis queue
-                    queue_axes: list[str | None] = []
-                    if consumer_axis in {"X", "Y"}:
-                        queue_axes = [consumer_axis, None]
-                    else:
-                        queue_axes = ["X", "Y", None]
-                    
-                    for axis_key in queue_axes:
-                        queue = num_rx_queues_same[axis_key]
-                        if not queue:
-                            continue
-                        head_line, remaining = queue[0]
-                        self._num_rx_unblocker_by_rx[line_idx] = head_line
-                        self._num_rx_consumers_by_source.setdefault(head_line, []).append(line_idx)
-                        remaining -= 1
-                        if remaining <= 0:
-                            queue.pop(0)
-                        else:
-                            queue[0] = (head_line, remaining)
-                        break
-
 
     def _jump_to_index(self, index: int | None) -> None:
         if index is None or not self._flat_entries:
@@ -1558,14 +1407,10 @@ class IRViewerApp(App):
             self._highlight_num_rx_consumers = set()
             self._render_viewport()
             return
-        self._highlight_semaphore = self._semaphore_unblocker_by_tx.get(node.source_index)
-        self._highlight_num_rx = self._num_rx_unblocker_by_rx.get(node.source_index)
-        self._highlight_semaphore_consumers = set(
-            self._semaphore_consumers_by_source.get(node.source_index, [])
-        )
-        self._highlight_num_rx_consumers = set(
-            self._num_rx_consumers_by_source.get(node.source_index, [])
-        )
+        self._highlight_semaphore = instruction.semaphore_unblocker
+        self._highlight_num_rx = instruction.num_rx_unblocker
+        self._highlight_semaphore_consumers = set(instruction.semaphore_consumers)
+        self._highlight_num_rx_consumers = set(instruction.num_rx_consumers)
         defs, uses = self._instruction_defs_uses(instruction)
         container_id = self._container_by_line.get(node.source_index)
 

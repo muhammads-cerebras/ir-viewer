@@ -66,6 +66,17 @@ class Instruction:
     result_types: List[str]
     uniform_type: Optional[str]
     source_vars: List[str]
+    # Semaphore/num_rx relationships
+    semaphore_unblocker: Optional[int] = None  # Line index of instruction that unblocks this via semaphore
+    num_rx_unblocker: Optional[int] = None  # Line index of instruction that unblocks this via num_rx
+    semaphore_consumers: List[int] = None  # Line indices of instructions unblocked by this via semaphore
+    num_rx_consumers: List[int] = None  # Line indices of instructions unblocked by this via num_rx
+
+    def __post_init__(self):
+        if self.semaphore_consumers is None:
+            object.__setattr__(self, 'semaphore_consumers', [])
+        if self.num_rx_consumers is None:
+            object.__setattr__(self, 'num_rx_consumers', [])
 
 
 @dataclass
@@ -381,6 +392,25 @@ class DocumentView:
                 if instruction:
                     self.instructions[idx] = instruction
         self.source_var_suffixes = _compute_source_var_suffixes(self.document.lines, self.instructions)
+
+    def _ensure_semaphore_relationships(self) -> None:
+        """Compute semaphore and num_rx producer-consumer relationships."""
+        if not self.instructions:
+            for idx, line in enumerate(self.document.lines):
+                instruction = _parse_instruction_line(line, idx)
+                if instruction:
+                    self.instructions[idx] = instruction
+        
+        # Check if relationships are already computed
+        for inst in self.instructions.values():
+            if inst.semaphore_unblocker is not None or inst.num_rx_unblocker is not None:
+                return
+            if inst.semaphore_consumers or inst.num_rx_consumers:
+                return
+            break
+        
+        # Compute relationships
+        _compute_semaphore_relationships(self.instructions)
 
 
 def _prune_container_children(node: Node) -> None:
@@ -1358,12 +1388,7 @@ def _instruction_label(
             op_value
             and (op_value.startswith("slave") or op_value.startswith("switchroot"))
             and not op_value.startswith("slaveCacheStore")
-            and inst_tail in {
-            "tx",
-            "txact",
-            "request_txact",
-            "master_tx",
-            }
+            and inst_tail in {"master_tx"}
         ):
             num_rx_value = "1"
         elif (
@@ -1371,12 +1396,7 @@ def _instruction_label(
             and not op_value.startswith("slave")
             and not op_value.startswith("switchroot")
             and not op_value.startswith("none")
-            and inst_tail in {
-            "tx",
-            "txact",
-            "request_txact",
-            "master_tx",
-            }
+            and inst_tail in {"master_tx"}
         ):
             num_rx_value = "1"
     if num_rx_value:
@@ -1946,3 +1966,183 @@ def _single_metadata_item(extras: List[str]) -> Optional[str]:
             item = item[1:-1]
         return item.strip() or None
     return None
+
+
+def _is_tx_instruction(inst_name: str) -> bool:
+    name = inst_name.split(".")[-1]
+    return name in {"tx", "txact", "request_txact", "master_tx", "slave_reconfig"}
+
+
+def _is_rx_consumer(inst_name: str, attrs: Optional[str]) -> bool:
+    name = inst_name.split(".")[-1]
+    if name not in {"rx", "rxact", "request_rxact", "master_rx"}:
+        return False
+    op_value = _op_attr_value(attrs)
+    # rx is a consumer if it's slave/switchroot OR if it's non-slave, non-switchroot, non-none
+    if op_value:
+        return not op_value.startswith("none")
+    return False
+
+
+def _axis_from_attrs(attrs: Optional[str]) -> Optional[str]:
+    if not attrs:
+        return None
+    if "onX" in attrs:
+        return "X"
+    if "onY" in attrs:
+        return "Y"
+    return None
+
+
+def _parse_semaphore_count(value: Optional[str]) -> Optional[int]:
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if re.fullmatch(r"-?\d+", value):
+        return int(value)
+    try:
+        as_float = float(value)
+    except ValueError:
+        return None
+    if as_float.is_integer():
+        return int(as_float)
+    return None
+
+
+def _compute_semaphore_relationships(instructions: Dict[int, Instruction]) -> None:
+    """Compute semaphore and num_rx producer-consumer relationships for all instructions."""
+    # Separate queues for same-axis and opposite-axis num_rx consumption
+    semaphore_queues: Dict[Optional[str], List[tuple[int, int]]] = {"X": [], "Y": [], None: []}
+    num_rx_queues_same: Dict[Optional[str], List[tuple[int, int]]] = {"X": [], "Y": [], None: []}
+    num_rx_queues_opposite: Dict[Optional[str], List[tuple[int, int]]] = {"X": [], "Y": [], None: []}
+    
+    # Process all instructions in order
+    for line_idx in sorted(instructions.keys()):
+        instruction = instructions[line_idx]
+        axis = _axis_from_attrs(instruction.attrs)
+        
+        # Handle semaphore production
+        sem_value = _semaphore_value(instruction.attrs)
+        sem_count = _parse_semaphore_count(sem_value)
+        if sem_count and sem_count > 0:
+            semaphore_queues[axis].append((line_idx, sem_count))
+        
+        # Handle num_rx production
+        num_rx_value = _num_rx_value(instruction.attrs)
+        num_rx_count = _parse_semaphore_count(num_rx_value)
+        is_slave_or_switchroot_tx = False
+        is_other_tx = False
+        
+        if not num_rx_count:
+            op_value = _op_attr_value(instruction.attrs)
+            inst_tail = instruction.inst.split(".")[-1]
+            if (
+                op_value
+                and (op_value.startswith("slave") or op_value.startswith("switchroot"))
+                and not op_value.startswith("slaveCacheStore")
+                and inst_tail in {"master_tx"}
+            ):
+                num_rx_count = 1
+                is_slave_or_switchroot_tx = True
+            elif (
+                op_value
+                and not op_value.startswith("slave")
+                and not op_value.startswith("switchroot")
+                and not op_value.startswith("none")
+                and inst_tail in {"master_tx"}
+            ):
+                num_rx_count = 1
+                is_other_tx = True
+        
+        if num_rx_count and num_rx_count > 0:
+            # Route to appropriate queue
+            if is_slave_or_switchroot_tx:
+                num_rx_queues_opposite[axis].append((line_idx, num_rx_count))
+            elif is_other_tx:
+                num_rx_queues_same[axis].append((line_idx, num_rx_count))
+            else:
+                # Explicit num_rx - check op to determine queue
+                op_value = _op_attr_value(instruction.attrs)
+                if op_value and (op_value.startswith("slave") or op_value.startswith("switchroot")):
+                    num_rx_queues_opposite[axis].append((line_idx, num_rx_count))
+                else:
+                    num_rx_queues_same[axis].append((line_idx, num_rx_count))
+        
+        # Handle semaphore consumption
+        if _is_tx_instruction(instruction.inst):
+            queue = semaphore_queues[axis]
+            if queue:
+                producer_idx, remaining = queue[0]
+                # Update both producer and consumer
+                object.__setattr__(instruction, 'semaphore_unblocker', producer_idx)
+                producer = instructions[producer_idx]
+                new_consumers = list(producer.semaphore_consumers) + [line_idx]
+                object.__setattr__(producer, 'semaphore_consumers', new_consumers)
+                remaining -= 1
+                if remaining <= 0:
+                    queue.pop(0)
+                else:
+                    queue[0] = (producer_idx, remaining)
+        
+        # Handle num_rx consumption
+        if _is_rx_consumer(instruction.inst, instruction.attrs):
+            consumer_axis = _axis_from_attrs(instruction.attrs)
+            consumer_op = _op_attr_value(instruction.attrs)
+            
+            # Determine which queue based on consumer's op
+            is_opposite_axis_rx = consumer_op and (
+                consumer_op.startswith("slave") or consumer_op.startswith("switchroot")
+            )
+            
+            if is_opposite_axis_rx:
+                # Try opposite-axis queue
+                queue_axes: List[Optional[str]] = []
+                if consumer_axis in {"X", "Y"}:
+                    opposite = "Y" if consumer_axis == "X" else "X"
+                    queue_axes = [opposite, None]
+                else:
+                    queue_axes = ["X", "Y", None]
+                
+                for axis_key in queue_axes:
+                    queue = num_rx_queues_opposite[axis_key]
+                    if not queue:
+                        continue
+                    producer_idx, remaining = queue[0]
+                    # Update both producer and consumer
+                    object.__setattr__(instruction, 'num_rx_unblocker', producer_idx)
+                    producer = instructions[producer_idx]
+                    new_consumers = list(producer.num_rx_consumers) + [line_idx]
+                    object.__setattr__(producer, 'num_rx_consumers', new_consumers)
+                    remaining -= 1
+                    if remaining <= 0:
+                        queue.pop(0)
+                    else:
+                        queue[0] = (producer_idx, remaining)
+                    break
+            else:
+                # Try same-axis queue
+                queue_axes: List[Optional[str]] = []
+                if consumer_axis in {"X", "Y"}:
+                    queue_axes = [consumer_axis, None]
+                else:
+                    queue_axes = ["X", "Y", None]
+                
+                for axis_key in queue_axes:
+                    queue = num_rx_queues_same[axis_key]
+                    if not queue:
+                        continue
+                    producer_idx, remaining = queue[0]
+                    # Update both producer and consumer
+                    object.__setattr__(instruction, 'num_rx_unblocker', producer_idx)
+                    producer = instructions[producer_idx]
+                    new_consumers = list(producer.num_rx_consumers) + [line_idx]
+                    object.__setattr__(producer, 'num_rx_consumers', new_consumers)
+                    remaining -= 1
+                    if remaining <= 0:
+                        queue.pop(0)
+                    else:
+                        queue[0] = (producer_idx, remaining)
+                    break
+
