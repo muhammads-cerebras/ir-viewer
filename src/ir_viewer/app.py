@@ -513,6 +513,8 @@ class IRViewerApp(App):
             extra_lines: list[str] = []
             instruction = self.view.instructions.get(node.source_index)
             if instruction:
+                producer_items: list[tuple[str, str]] = []
+                consumer_items: list[tuple[str, str]] = []
                 sem_source = instruction.semaphore_unblocker
                 if sem_source is not None:
                     inst = self.view.instructions.get(sem_source)
@@ -529,7 +531,24 @@ class IRViewerApp(App):
                             self.options.show_source_vars,
                             False,
                         )
-                        extra_lines.append(f"Semaphore source: {label}")
+                        producer_items.append(("S", label))
+                for consumer_idx in instruction.semaphore_consumers:
+                    inst = self.view.instructions.get(consumer_idx)
+                    if not inst:
+                        continue
+                    label = _instruction_label(
+                        inst,
+                        self.options,
+                        self.document.allocs,
+                        consumer_idx,
+                        self.options.show_alloc_sizes,
+                        self.options.show_left_types,
+                        self.view.ws_rt_io,
+                        None,
+                        self.options.show_source_vars,
+                        False,
+                    )
+                    consumer_items.append(("S", label))
                 num_rx_source = instruction.num_rx_unblocker
                 if num_rx_source is not None:
                     inst = self.view.instructions.get(num_rx_source)
@@ -546,7 +565,32 @@ class IRViewerApp(App):
                             self.options.show_source_vars,
                             False,
                         )
-                        extra_lines.append(f"num_rx source: {label}")
+                        producer_items.append(("D", label))
+                for consumer_idx in instruction.num_rx_consumers:
+                    inst = self.view.instructions.get(consumer_idx)
+                    if not inst:
+                        continue
+                    label = _instruction_label(
+                        inst,
+                        self.options,
+                        self.document.allocs,
+                        consumer_idx,
+                        self.options.show_alloc_sizes,
+                        self.options.show_left_types,
+                        self.view.ws_rt_io,
+                        None,
+                        self.options.show_source_vars,
+                        False,
+                    )
+                    consumer_items.append(("D", label))
+                if producer_items:
+                    extra_lines.append("Producer:")
+                    for kind, label in producer_items:
+                        extra_lines.append(f"\u200b{kind}  - {label}")
+                if consumer_items:
+                    extra_lines.append("Consumers:")
+                    for kind, label in consumer_items:
+                        extra_lines.append(f"\u200b{kind}  - {label}")
             if extra_lines:
                 lines = text.plain.splitlines()
                 insert_at = 3 if len(lines) >= 3 else len(lines)

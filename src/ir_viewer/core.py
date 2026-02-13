@@ -1759,6 +1759,12 @@ def _highlight_details(text: str) -> Text:
         stripped = line.strip()
         if stripped in section_titles:
             rendered.stylize("bold white on grey23", offset, offset + len(line))
+        if stripped in {"Producer:", "Consumers:"}:
+            rendered.stylize("bold white on grey23", offset, offset + len(line))
+        if "\u200bS" in line:
+            rendered.stylize("cyan", offset, offset + len(line))
+        elif "\u200bD" in line:
+            rendered.stylize("yellow", offset, offset + len(line))
         if set(stripped) == {"-"} and len(stripped) >= 3:
             rendered.stylize("grey50", offset, offset + len(line))
         if stripped.startswith("SrcTgts:"):
