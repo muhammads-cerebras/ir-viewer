@@ -185,6 +185,8 @@ class DocumentView:
         if not layout_text:
             layout_text = _extract_inline_layout(line)
         loc_text = _extract_loc_text(_resolve_ref(line, _LOC_REF_RE, self.document.locs))
+        if not loc_text:
+            loc_text = _extract_loc_text(_inline_loc_from_line(line))
         attrs_source = instruction.attrs if instruction and instruction.attrs else node.attrs
         attrs_lines = _format_attrs(attrs_source) if attrs_source else []
 
@@ -257,6 +259,8 @@ class DocumentView:
         if not layout_text:
             layout_text = _extract_inline_layout(line)
         loc_text = _extract_loc_text(_resolve_ref(line, _LOC_REF_RE, self.document.locs))
+        if not loc_text:
+            loc_text = _extract_loc_text(_inline_loc_from_line(line))
         attrs_source = instruction.attrs if instruction and instruction.attrs else node.attrs
         attrs_lines = _format_attrs(attrs_source) if attrs_source else []
 
@@ -710,7 +714,7 @@ def _extract_inline_layout(line: str) -> Optional[str]:
 def _parse_instruction_line(line: str, source_index: int) -> Optional[Instruction]:
     if not _is_instruction_line(line):
         return None
-    raw = line.rstrip()
+    raw = _strip_cirh_type_annotations(line.rstrip())
     loc_ref = None
     layout_ref = None
 
@@ -718,6 +722,10 @@ def _parse_instruction_line(line: str, source_index: int) -> Optional[Instructio
     if loc_match:
         loc_ref = loc_match.group(1)
         raw = raw.split(" loc(", 1)[0].rstrip()
+    else:
+        inline_loc_match = re.search(r"\bloc\(\".*?\"\)", raw)
+        if inline_loc_match:
+            raw = raw[: inline_loc_match.start()].rstrip()
 
     layout_match = _LAYOUT_REF_RE.search(raw)
     if layout_match:
@@ -780,7 +788,9 @@ def _parse_instruction_line(line: str, source_index: int) -> Optional[Instructio
     inst = parts[0] if parts else rest
     operands = parts[1].strip() if len(parts) > 1 else ""
 
-    arg_types, result_types, uniform_type = _parse_type_signature(type_sig)
+    result_count = len(_split_values(results))
+    operand_count = len(_split_values(operands))
+    arg_types, result_types, uniform_type = _parse_type_signature(type_sig, result_count, operand_count)
     source_vars = _extract_source_vars(attrs) if attrs else []
 
     return Instruction(
@@ -947,7 +957,10 @@ def _split_top_level(text: str, sep: str) -> List[str]:
             if ch in "[{(<":
                 depth += 1
             elif ch in "]})>":
-                depth = max(0, depth - 1)
+                if ch == ">" and prev == "-":
+                    pass
+                else:
+                    depth = max(0, depth - 1)
             if ch == sep and depth == 0:
                 parts.append("".join(buf))
                 buf = []
@@ -1645,6 +1658,43 @@ def _extract_loc_text(loc_text: Optional[str]) -> Optional[str]:
     return loc_text
 
 
+def _strip_cirh_type_annotations(text: str) -> str:
+    if "#cirh.Vts" not in text:
+        return text
+    out: list[str] = []
+    idx = 0
+    while idx < len(text):
+        hit = text.find("#cirh.Vts", idx)
+        if hit == -1:
+            out.append(text[idx:])
+            break
+        prefix_end = hit
+        if hit >= 2 and text[hit - 2 : hit] == ", ":
+            prefix_end = hit - 2
+        out.append(text[idx:prefix_end])
+        bracket = text.find("[", hit)
+        if bracket == -1:
+            idx = hit + len("#cirh.Vts")
+            continue
+        depth = 1
+        j = bracket + 1
+        while j < len(text) and depth > 0:
+            if text[j] == "[":
+                depth += 1
+            elif text[j] == "]":
+                depth -= 1
+            j += 1
+        idx = j
+    return "".join(out)
+
+
+def _inline_loc_from_line(line: str) -> Optional[str]:
+    match = re.search(r"\bloc\((\".*?\")\)", line)
+    if match:
+        return f"loc({match.group(1)})"
+    return None
+
+
 def _extract_source_vars(attrs: Optional[str]) -> List[str]:
     if not attrs:
         return []
@@ -1873,12 +1923,36 @@ def _operand_values(text: str) -> List[str]:
     return _SSA_RE.findall(text)
 
 
-def _parse_type_signature(type_sig: str) -> tuple[List[str], List[str], Optional[str]]:
-    if not type_sig or "->" not in type_sig:
+def _parse_type_signature(type_sig: str, result_count: int, operand_count: int) -> tuple[List[str], List[str], Optional[str]]:
+    if not type_sig:
         return [], [], None
-    left, right = type_sig.split("->", 1)
-    left = left.strip()
-    right = right.strip()
+
+    arrow_idx = _find_top_level_arrow(type_sig)
+    if arrow_idx is None:
+        parts = [t.strip() for t in _split_top_level(type_sig, ",") if t.strip()]
+        if not parts:
+            return [], [], None
+        if result_count <= 0:
+            if operand_count > 0 and len(parts) >= operand_count:
+                arg_types = parts[:operand_count]
+                result_types = []
+            else:
+                arg_types = parts
+                result_types = []
+            return arg_types, result_types, None
+        if operand_count > 0 and len(parts) >= result_count + operand_count:
+            result_types = parts[:result_count]
+            arg_types = parts[result_count : result_count + operand_count]
+        else:
+            result_types = parts[:result_count]
+            arg_types = parts[result_count:]
+        uniform_type = None
+        if len(result_types) == 1 and not arg_types:
+            uniform_type = result_types[0]
+        return arg_types, result_types, uniform_type
+
+    left = type_sig[:arrow_idx].strip()
+    right = type_sig[arrow_idx + 2 :].strip()
     uniform_type = None
     arg_text = left
     if left.startswith("(") and left.endswith(")"):
@@ -1891,6 +1965,46 @@ def _parse_type_signature(type_sig: str) -> tuple[List[str], List[str], Optional
         right = right[1:-1].strip()
     result_types = [t.strip() for t in _split_top_level(right, ",") if t.strip()]
     return arg_types, result_types, uniform_type
+
+
+def _find_top_level_arrow(text: str) -> Optional[int]:
+    depth_paren = 0
+    depth_bracket = 0
+    depth_brace = 0
+    depth_angle = 0
+    idx = 0
+    prev = ""
+    while idx < len(text) - 1:
+        ch = text[idx]
+        if ch == "(":
+            depth_paren += 1
+        elif ch == ")":
+            depth_paren = max(0, depth_paren - 1)
+        elif ch == "[":
+            depth_bracket += 1
+        elif ch == "]":
+            depth_bracket = max(0, depth_bracket - 1)
+        elif ch == "{":
+            depth_brace += 1
+        elif ch == "}":
+            depth_brace = max(0, depth_brace - 1)
+        elif ch == "<":
+            depth_angle += 1
+        elif ch == ">":
+            if prev != "-":
+                depth_angle = max(0, depth_angle - 1)
+        if (
+            ch == "-"
+            and text[idx + 1] == ">"
+            and depth_paren == 0
+            and depth_bracket == 0
+            and depth_brace == 0
+            and depth_angle == 0
+        ):
+            return idx
+        prev = ch
+        idx += 1
+    return None
 
 
 def _short_type(type_text: Optional[str]) -> Optional[str]:

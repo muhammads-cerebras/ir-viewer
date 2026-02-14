@@ -764,6 +764,13 @@ class IRViewerApp(App):
                     label_text.stylize("green", match.start(), match.end())
                 for match in _SOURCE_VARS_RE.finditer(label_string):
                     label_text.stylize("violet", match.start(), match.end())
+                type_sep = label_string.find(" : ")
+                if type_sep != -1:
+                    label_text.stylize("magenta", type_sep + 3, len(label_string))
+                for match in re.finditer(r"(?<!\S)([^\s]+)\s+%[A-Za-z0-9_$.]+", label_string):
+                    type_start = match.start(1)
+                    type_end = match.end(1)
+                    label_text.stylize("magenta", type_start, type_end)
                 sem_value = _semaphore_value(instruction.attrs)
                 if sem_value:
                     sem_text = f"→ ({sem_value} tx)"
