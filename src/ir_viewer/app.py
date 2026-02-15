@@ -446,7 +446,10 @@ class IRViewerApp(App):
             return text
 
         for value in uses:
-            def_line = self._lookup_def_line(value, line_idx, container_id, exclude_current=True)
+            alloc = _alloc_for_value(self.document.allocs, value, line_idx)
+            parent = alloc.parent if alloc and alloc.parent else None
+            key = parent or value
+            def_line = self._lookup_def_line(key, line_idx, container_id, exclude_current=True)
             if def_line is None:
                 continue
             inst = self.view.instructions.get(def_line)
@@ -462,7 +465,8 @@ class IRViewerApp(App):
                 self.options.show_source_vars,
                 False,
             ) if inst else self.document.lines[def_line].strip()
-            entry = (_make_label("Input", f"{value} ← {label}", "cyan"), def_line)
+            input_name = f"{value} (via {key})" if key != value else value
+            entry = (_make_label("Input", f"{input_name} ← {label}", "cyan"), def_line)
             if ("input", def_line) not in seen:
                 items.append(entry)
                 seen.add(("input", def_line))
