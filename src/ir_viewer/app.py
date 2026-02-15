@@ -1534,11 +1534,15 @@ class IRViewerApp(App):
             target_row = max(0, min(max_row, current_row + delta))
             if target_row == current_row:
                 return
-            entry_map = row_to_entries.get(target_row, {})
-            target_idx = entry_map.get(self._split_focus_side)
-            if target_idx is None:
-                other_side = "right" if self._split_focus_side == "left" else "left"
-                target_idx = entry_map.get(other_side)
+            step = 1 if target_row > current_row else -1
+            target_idx = None
+            row = target_row
+            while 0 <= row <= max_row:
+                entry_map = row_to_entries.get(row, {})
+                target_idx = entry_map.get(self._split_focus_side)
+                if target_idx is not None:
+                    break
+                row += step
             if target_idx is None:
                 return
             self._set_selected_index(target_idx)
