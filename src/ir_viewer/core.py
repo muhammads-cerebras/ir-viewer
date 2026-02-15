@@ -229,9 +229,20 @@ class DocumentView:
                 parts.append("")
                 parts.append("Location")
                 parts.append(loc_text)
+            merged_values = res_buffers + arg_buffers
+            merged_types = res_types + arg_types
+            dedup_values: List[str] = []
+            dedup_types: List[str] = []
+            seen_values: set[str] = set()
+            for idx, value in enumerate(merged_values):
+                if value in seen_values:
+                    continue
+                seen_values.add(value)
+                dedup_values.append(value)
+                dedup_types.append(merged_types[idx] if idx < len(merged_types) else "")
             alloc_lines = _format_alloc_table(
-                res_buffers + arg_buffers,
-                res_types + arg_types,
+                dedup_values,
+                dedup_types,
                 self.document.allocs,
                 node.source_index,
             )
@@ -253,6 +264,10 @@ class DocumentView:
             parts.append("")
             parts.append("Attributes")
             parts.extend(attrs_lines)
+
+        parts.append("")
+        parts.append("Original instruction")
+        parts.append(instruction.raw if instruction else line.rstrip())
 
         return _highlight_details("\n".join(parts))
         layout_text = _resolve_ref(line, _LAYOUT_REF_RE, self.document.layouts)
@@ -299,9 +314,20 @@ class DocumentView:
                 _, res_buffers, arg_buffers = _instruction_buffers(instruction)
                 res_types = instruction.result_types
                 arg_types = instruction.arg_types
+            merged_values = res_buffers + arg_buffers
+            merged_types = res_types + arg_types
+            dedup_values: List[str] = []
+            dedup_types: List[str] = []
+            seen_values: set[str] = set()
+            for idx, value in enumerate(merged_values):
+                if value in seen_values:
+                    continue
+                seen_values.add(value)
+                dedup_values.append(value)
+                dedup_types.append(merged_types[idx] if idx < len(merged_types) else "")
             alloc_lines = _format_alloc_table(
-                res_buffers + arg_buffers,
-                res_types + arg_types,
+                dedup_values,
+                dedup_types,
                 self.document.allocs,
                 node.source_index,
             )
@@ -1805,7 +1831,7 @@ def _highlight_details(text: str) -> Text:
     lines = padded_text.splitlines(keepends=True)
     offset = 0
     in_srctgts = False
-    section_titles = {"Allocations", "Layouts", "Attributes", "Location"}
+    section_titles = {"Allocations", "Layouts", "Attributes", "Location", "Original instruction"}
     for line in lines:
         stripped = line.strip()
         if stripped in section_titles:
