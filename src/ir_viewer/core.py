@@ -1040,7 +1040,50 @@ def _format_attrs(attr_text: str) -> List[str]:
             formatted.append("")
         formatted.append("--------------------")
         formatted.extend(used_formatted)
-    return formatted
+    return _align_simple_attrs(formatted)
+
+
+def _align_simple_attrs(lines: List[str]) -> List[str]:
+    if not lines:
+        return lines
+
+    parsed: List[tuple[str, Optional[str], Optional[str]]] = []
+    max_key = 0
+    for line in lines:
+        stripped = line.strip()
+        if (
+            not stripped
+            or line.startswith("  ")
+            or stripped == "--------------------"
+            or stripped.endswith(":")
+        ):
+            parsed.append(("raw", line, None))
+            continue
+
+        if "=" in line:
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            parsed.append(("kv", key, value))
+            max_key = max(max_key, len(key))
+            continue
+
+        key = stripped
+        parsed.append(("tag", key, None))
+        max_key = max(max_key, len(key))
+
+    if max_key == 0:
+        return lines
+
+    aligned: List[str] = []
+    for kind, first, second in parsed:
+        if kind == "raw":
+            aligned.append(first or "")
+        elif kind == "kv":
+            aligned.append(f"{(first or '').ljust(max_key)} = {second or ''}")
+        else:
+            aligned.append((first or "").ljust(max_key))
+    return aligned
 
 
 def _const_from_attrs(attrs: Optional[str]) -> Optional[str]:
@@ -1248,6 +1291,8 @@ def _pretty_layout(raw: str) -> tuple[str, Optional[str]]:
                         formatted_fields.append(f"    { _compact_layout_value(item) }")
                 formatted_fields.append("  ]")
             else:
+                if key == "Replicate" and _is_all_ones_replicate(value):
+                    continue
                 formatted_fields.append(f"  {key}: {_compact_layout_value(value)}")
         else:
             formatted_fields.append(f"  {field}")
@@ -1297,6 +1342,28 @@ def _compact_layout_value(value: str) -> str:
     compact = compact.replace(" ,", ",")
     compact = compact.replace("{", "").replace("}", "")
     return compact.strip()
+
+
+def _is_all_ones_replicate(value: str) -> bool:
+    compact = _compact_layout_value(value)
+    if not (compact.startswith("[") and compact.endswith("]")):
+        return False
+    inner = compact[1:-1].strip()
+    if not inner:
+        return False
+    tokens = [token.strip() for token in inner.split(",") if token.strip()]
+    if not tokens:
+        return False
+    saw_numeric = False
+    for token in tokens:
+        if token == "...":
+            continue
+        if not re.fullmatch(r"[+-]?\d+", token):
+            return False
+        if int(token) != 1:
+            return False
+        saw_numeric = True
+    return saw_numeric
 
 
 def _parse_srctgts_fields(parts: List[str]) -> Optional[Dict[str, str]]:
@@ -1984,13 +2051,26 @@ def _highlight_details(text: str, highlight_non_simple_srctgt: bool = True) -> T
     lines = padded_text.splitlines(keepends=True)
     offset = 0
     in_srctgts = False
+    in_attributes = False
+    attr_row_index = 0
     section_titles = {"Allocations", "Layouts", "Attributes", "Location", "Original instruction"}
     for line in lines:
         stripped = line.strip()
+        if stripped == "Attributes":
+            in_attributes = True
+            attr_row_index = 0
+        elif stripped in section_titles:
+            in_attributes = False
         if stripped in section_titles:
             rendered.stylize("bold white on grey23", offset, offset + len(line))
         if stripped in {"Producer:", "Consumers:"}:
             rendered.stylize("bold white on grey23", offset, offset + len(line))
+        if in_attributes and stripped and stripped not in {"Attributes", "--------------------"}:
+            is_simple_attr = not line.startswith("  ") and not stripped.endswith(":")
+            if is_simple_attr:
+                if attr_row_index % 2 == 1:
+                    rendered.stylize("on rgb(38,38,38)", offset, offset + len(line))
+                attr_row_index += 1
         if "\u200bS" in line:
             rendered.stylize("cyan", offset, offset + len(line))
         elif "\u200bD" in line:
@@ -2011,7 +2091,7 @@ def _highlight_details(text: str, highlight_non_simple_srctgt: bool = True) -> T
                 src_size = size_matches[0].group(1).strip().replace(" ", "")
                 tgt_size = size_matches[1].group(1).strip().replace(" ", "")
                 if src_size and tgt_size and src_size != tgt_size:
-                    rendered.stylize("on rgb(55,50,35)", offset, offset + len(line))
+                    rendered.stylize("on rgb(38,38,38)", offset, offset + len(line))
             tgt_match = re.search(r"→\s*(\[[^\]]*\])", line)
             if tgt_match:
                 tgt_start = offset + tgt_match.start(1)
