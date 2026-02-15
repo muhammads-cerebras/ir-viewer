@@ -990,7 +990,7 @@ def _format_attrs(attr_text: str) -> List[str]:
         if "=" not in stripped:
             return False
         key = stripped.split("=", 1)[0].strip()
-        return key in {"_op", "op", "operand_segment_sizes", "semaphore", "num_rx", "first_iteration_only"}
+        return key in {"_op", "op", "operation", "operand_segment_sizes", "semaphore", "num_rx", "first_iteration_only"}
 
     def _append_lines(target: List[str], lines: List[str]) -> None:
         for line in lines:
@@ -1012,7 +1012,10 @@ def _format_attrs(attr_text: str) -> List[str]:
                 if inner:
                     entries = [e.strip() for e in _split_top_level(inner, ",") if e.strip()]
                     for entry in entries:
-                        part_lines.append(f"  {_strip_type_annotations(entry)}")
+                        if "source_vars" in entry:
+                            part_lines.append(f"  {entry}")
+                        else:
+                            part_lines.append(f"  {_strip_type_annotations(entry)}")
                 _append_lines(target, part_lines)
                 continue
         if "source_vars" in part:
@@ -1020,15 +1023,9 @@ def _format_attrs(attr_text: str) -> List[str]:
             if match:
                 list_body = match.group(1)
                 entries = [e.strip() for e in _split_top_level(list_body, ",") if e.strip()]
-                cleaned: List[str] = []
-                for entry in entries:
-                    if entry.startswith("\"") and entry.endswith("\"") and len(entry) >= 2:
-                        entry = entry[1:-1]
-                    if entry:
-                        cleaned.append(entry)
-                if cleaned:
+                if entries:
                     part_lines.append("source_vars:")
-                    part_lines.extend([f"  {item}" for item in cleaned])
+                    part_lines.extend([f"  {item}" for item in entries])
                 without = re.sub(r"source_vars\s*=\s*\[[^\]]*\]\s*,?\s*", "", part)
                 without = without.replace("{ ,", "{").replace(", }", "}").replace("{ }", "{}")
                 without = without.strip()
@@ -1102,7 +1099,7 @@ def _const_from_attrs(attrs: Optional[str]) -> Optional[str]:
 def _op_attr_value(attrs: Optional[str]) -> Optional[str]:
     if not attrs:
         return None
-    match = re.search(r"\b(?:_?op)\b\s*=\s*([^,}]+)", attrs)
+    match = re.search(r"\b(?:_?op|operation)\b\s*=\s*([^,}]+)", attrs)
     if not match:
         return None
     value = match.group(1).strip()
