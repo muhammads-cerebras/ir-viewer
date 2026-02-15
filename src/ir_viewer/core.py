@@ -976,22 +976,39 @@ def _format_attrs(attr_text: str) -> List[str]:
         return []
     parts = [part.strip() for part in _split_top_level(text, ",") if part.strip()]
     formatted: List[str] = []
+    used_formatted: List[str] = []
+
+    def _is_instruction_used_attr(part: str) -> bool:
+        stripped = _strip_type_annotations(part).strip()
+        if stripped in {"onX", "onY", "first_iteration_only"}:
+            return True
+        if "=" not in stripped:
+            return False
+        key = stripped.split("=", 1)[0].strip()
+        return key in {"_op", "op", "operand_segment_sizes", "semaphore", "num_rx", "first_iteration_only"}
+
+    def _append_lines(target: List[str], lines: List[str]) -> None:
+        for line in lines:
+            target.append(line)
     for part in parts:
         if re.match(r"^c\s*=", part):
             continue
         if re.match(r"^layout\s*=", part):
             continue
+        target = used_formatted if _is_instruction_used_attr(part) else formatted
+        part_lines: List[str] = []
         if ":" in part and "=" in part:
             key, value = part.split("=", 1)
             key = key.strip()
             value = value.strip()
             if value.startswith("{") and value.endswith("}"):
                 inner = value[1:-1].strip()
-                formatted.append(_strip_type_annotations(key) + ":")
+                part_lines.append(_strip_type_annotations(key) + ":")
                 if inner:
                     entries = [e.strip() for e in _split_top_level(inner, ",") if e.strip()]
                     for entry in entries:
-                        formatted.append(f"  {_strip_type_annotations(entry)}")
+                        part_lines.append(f"  {_strip_type_annotations(entry)}")
+                _append_lines(target, part_lines)
                 continue
         if "source_vars" in part:
             match = re.search(r"source_vars\s*=\s*\[(.*)\]", part)
@@ -1005,15 +1022,23 @@ def _format_attrs(attr_text: str) -> List[str]:
                     if entry:
                         cleaned.append(entry)
                 if cleaned:
-                    formatted.append("source_vars:")
-                    formatted.extend([f"  {item}" for item in cleaned])
+                    part_lines.append("source_vars:")
+                    part_lines.extend([f"  {item}" for item in cleaned])
                 without = re.sub(r"source_vars\s*=\s*\[[^\]]*\]\s*,?\s*", "", part)
                 without = without.replace("{ ,", "{").replace(", }", "}").replace("{ }", "{}")
                 without = without.strip()
                 if without and without not in {"cs.internal = {}", "cs.internal ={}"}:
-                    formatted.append(_strip_type_annotations(without))
+                    part_lines.append(_strip_type_annotations(without))
+                _append_lines(target, part_lines)
                 continue
-        formatted.append(_strip_type_annotations(part))
+        part_lines.append(_strip_type_annotations(part))
+        _append_lines(target, part_lines)
+
+    if used_formatted:
+        if formatted:
+            formatted.append("")
+        formatted.append("--------------------")
+        formatted.extend(used_formatted)
     return formatted
 
 
