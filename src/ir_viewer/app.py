@@ -63,11 +63,11 @@ class IRViewerApp(App):
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
-        Binding("i", "toggle_details", "Toggle details panel"),
-        Binding("f", "open_jump", "Jump section"),
-        Binding("r", "open_quick_jump", "Quick jump"),
-        Binding("t", "open_toggles", "Left panel toggles"),
-        Binding("w", "toggle_left_wrap", "Toggle left wrap"),
+        Binding("i", "toggle_details", "More info"),
+        Binding("f", "open_jump", "Switch function"),
+        Binding("enter", "open_quick_jump", "Quick jump", show=False),
+        Binding("o", "open_toggles", "Options"),
+        Binding("w", "toggle_left_wrap", "Switch wrap"),
         Binding("/", "open_search", "Search"),
         Binding("?", "open_attr_search", "Attr search"),
         Binding("H", "open_help", "Help"),
@@ -81,7 +81,7 @@ class IRViewerApp(App):
         Binding("pagedown", "page_down", "Page down", show=False),
         Binding("home", "go_home", "Home", show=False),
         Binding("end", "go_end", "End", show=False),
-        Binding("enter", "select_current", "Select", show=False),
+        Binding("space", "select_current", "Select", show=False),
         Binding("j", "move_down", "Down", show=False),
         Binding("k", "move_up", "Up", show=False),
         Binding("h", "scroll_left", "Scroll left", show=False),
@@ -93,7 +93,7 @@ class IRViewerApp(App):
         Binding("g", "go_home", "Home", show=False),
         Binding("G", "go_end", "End", show=False),
         Binding("tab", "toggle_focus", "Toggle focus"),
-        Binding("shift+tab", "toggle_focus", "Toggle focus"),
+        Binding("shift+tab", "toggle_focus_back", "Toggle focus back"),
     ]
 
     def __init__(
@@ -329,11 +329,12 @@ class IRViewerApp(App):
             ("N / C-r", "Prev match"),
             ("?", "Attribute search"),
             ("f", "Jump section"),
-            ("t", "Left panel toggles"),
+            ("o", "Options"),
             ("i", "Toggle details panel"),
+            ("Enter", "Quick jump"),
+            ("Space", "Select"),
             ("H", "Help"),
             ("q", "Quit"),
-            ("Enter", "Select"),
         ]
         return items
 
@@ -389,18 +390,6 @@ class IRViewerApp(App):
             return
         if isinstance(self.focused, Input):
             return
-        if (
-            self.options.split_axis_view
-            and self._focus_target == "list"
-            and event.key in {"left", "right", "space"}
-        ):
-            if event.key == "space":
-                next_side = "right" if self._split_focus_side == "left" else "left"
-                self._switch_split_focus_side(next_side)
-            else:
-                self._switch_split_focus_side("left" if event.key == "left" else "right")
-            event.stop()
-            return
         emacs_actions = {
             "ctrl+n": self.action_move_down,
             "ctrl+p": self.action_move_up,
@@ -427,7 +416,7 @@ class IRViewerApp(App):
             "home": self.action_go_home,
             "end": self.action_go_end,
             "tab": self.action_toggle_focus,
-            "shift+tab": self.action_toggle_focus,
+            "shift+tab": self.action_toggle_focus_back,
         }
         action = key_actions.get(event.key)
         if action is not None:
@@ -628,13 +617,54 @@ class IRViewerApp(App):
     def action_toggle_focus(self) -> None:
         details = self.query_one("#details", RichLog)
         if not details.display:
-            details.display = True
-            self.action_focus_details()
+            if self.options.split_axis_view:
+                if self._split_focus_side == "left":
+                    self._switch_split_focus_side("right")
+                else:
+                    self._switch_split_focus_side("left")
             return
+        if not self.options.split_axis_view:
+            if self._details_focused():
+                self.action_focus_list()
+            else:
+                self.action_focus_details()
+            return
+
+        # Split mode cycle order: left -> right -> details -> left ...
         if self._details_focused():
             self.action_focus_list()
-        else:
-            self.action_focus_details()
+            self._switch_split_focus_side("left")
+            return
+        if self._split_focus_side == "left":
+            self._switch_split_focus_side("right")
+            return
+        self.action_focus_details()
+
+    def action_toggle_focus_back(self) -> None:
+        details = self.query_one("#details", RichLog)
+        if not details.display:
+            if self.options.split_axis_view:
+                if self._split_focus_side == "right":
+                    self._switch_split_focus_side("left")
+                else:
+                    self._switch_split_focus_side("right")
+            return
+        if not self.options.split_axis_view:
+            if self._details_focused():
+                self.action_focus_list()
+            else:
+                self.action_focus_details()
+            return
+
+        # Reverse split cycle: left <- right <- details <- left ...
+        if self._details_focused():
+            self.action_focus_list()
+            self._switch_split_focus_side("right")
+            return
+        if self._split_focus_side == "right":
+            self._switch_split_focus_side("left")
+            return
+        self.action_focus_details()
 
     def _render_list(self) -> None:
         list_log = self.query_one("#list", RichLog)
