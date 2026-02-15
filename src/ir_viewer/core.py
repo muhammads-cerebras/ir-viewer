@@ -251,9 +251,13 @@ class DocumentView:
                 parts.append("")
                 parts.append("Allocations")
                 parts.extend(alloc_lines)
+            layout_values = _operand_values(instruction.operands)
+            layout_types = list(instruction.arg_types)
+            if instruction.uniform_type and len(layout_types) < len(layout_values):
+                layout_types = layout_types + [instruction.uniform_type] * (len(layout_values) - len(layout_types))
             layout_lines = _format_layout_section(
-                res_buffers,
-                arg_buffers,
+                layout_values,
+                layout_types,
                 layout_text,
             )
             if layout_lines:
@@ -1799,25 +1803,32 @@ def _is_zero_literal(value: str) -> bool:
 
 
 def _format_layout_section(
-    results: List[str],
-    args: List[str],
+    values: List[str],
+    value_types: List[str],
     layout_text: Optional[str],
 ) -> List[str]:
     if not layout_text:
         return []
     grouped: Dict[str, List[tuple[str, Optional[str]]]] = {}
-    for idx, value in enumerate(results):
-        info = _layout_for_index_with_type(layout_text, idx)
+    ordered_layouts: List[tuple[int, str, Optional[str]]] = []
+    key_matches = sorted({int(m.group(1)) for m in re.finditer(r'"(\d+)"\s*=', layout_text)})
+    for key in key_matches:
+        info = _layout_for_index_with_type(layout_text, key)
         if not info:
             continue
         layout_info, layout_type = info
-        grouped.setdefault(layout_info, []).append((value, layout_type))
-    offset = len(results)
-    for idx, value in enumerate(args):
-        info = _layout_for_index_with_type(layout_text, offset + idx)
-        if not info:
+        ordered_layouts.append((key, layout_info, layout_type))
+
+    assignable_values: List[tuple[str, Optional[str]]] = []
+    for idx, value in enumerate(values):
+        if not value:
             continue
-        layout_info, layout_type = info
+        typ = value_types[idx] if idx < len(value_types) else None
+        if typ and "handle" in typ:
+            continue
+        assignable_values.append((value, typ))
+
+    for (value, _typ), (_key, layout_info, layout_type) in zip(assignable_values, ordered_layouts):
         grouped.setdefault(layout_info, []).append((value, layout_type))
 
     lines: List[str] = []
