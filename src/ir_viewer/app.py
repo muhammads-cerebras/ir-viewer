@@ -65,6 +65,7 @@ class IRViewerApp(App):
         Binding("q", "quit", "Quit"),
         Binding("i", "toggle_details", "Toggle details panel"),
         Binding("f", "open_jump", "Jump section"),
+        Binding("r", "open_quick_jump", "Quick jump"),
         Binding("t", "open_toggles", "Left panel toggles"),
         Binding("w", "toggle_left_wrap", "Toggle left wrap"),
         Binding("/", "open_search", "Search"),
@@ -435,6 +436,182 @@ class IRViewerApp(App):
 
     def action_open_toggles(self) -> None:
         self.push_screen(ToggleScreen(self.options), self._apply_toggles)
+
+    def action_open_quick_jump(self) -> None:
+        if not self.selected_node or self.selected_node.source_index is None:
+            return
+        instruction = self.view.instructions.get(self.selected_node.source_index)
+        if not instruction:
+            return
+        items: list[tuple[Text, int]] = []
+        seen: set[tuple[str, int]] = set()
+        line_idx = self.selected_node.source_index
+        container_id = self._container_by_line.get(line_idx)
+        defs, uses = self._instruction_defs_uses(instruction)
+        label_width = 10
+
+        def _make_label(kind: str, label: str, color: str) -> Text:
+            prefix = f"{kind:<{label_width}}"
+            text = Text(f"{prefix} {label}")
+            text.stylize(color, 0, len(prefix))
+            return text
+
+        for value in uses:
+            def_line = self._lookup_def_line(value, line_idx, container_id, exclude_current=True)
+            if def_line is None:
+                continue
+            inst = self.view.instructions.get(def_line)
+            label = _instruction_label(
+                inst,
+                self.options,
+                self.document.allocs,
+                def_line,
+                self.options.show_alloc_sizes,
+                self.options.show_left_types,
+                self.view.ws_rt_io,
+                None,
+                self.options.show_source_vars,
+                False,
+            ) if inst else self.document.lines[def_line].strip()
+            entry = (_make_label("Input", f"{value} ← {label}", "cyan"), def_line)
+            if ("input", def_line) not in seen:
+                items.append(entry)
+                seen.add(("input", def_line))
+
+        for use_line in self.use_by_def.get(line_idx, []):
+            inst = self.view.instructions.get(use_line)
+            label = _instruction_label(
+                inst,
+                self.options,
+                self.document.allocs,
+                use_line,
+                self.options.show_alloc_sizes,
+                self.options.show_left_types,
+                self.view.ws_rt_io,
+                None,
+                self.options.show_source_vars,
+                False,
+            ) if inst else self.document.lines[use_line].strip()
+            entry = (_make_label("User", label, "magenta"), use_line)
+            if ("user", use_line) not in seen:
+                items.append(entry)
+                seen.add(("user", use_line))
+
+        for def_value in defs:
+            for use_line in self.use_by_def.get(line_idx, []):
+                inst = self.view.instructions.get(use_line)
+                label = _instruction_label(
+                    inst,
+                    self.options,
+                    self.document.allocs,
+                    use_line,
+                    self.options.show_alloc_sizes,
+                    self.options.show_left_types,
+                    self.view.ws_rt_io,
+                    None,
+                    self.options.show_source_vars,
+                    False,
+                ) if inst else self.document.lines[use_line].strip()
+                entry = (_make_label("User", f"{def_value} → {label}", "magenta"), use_line)
+                if ("user", use_line) not in seen:
+                    items.append(entry)
+                    seen.add(("user", use_line))
+        for def_value in defs:
+            for use_line in self.use_map.get(def_value, []):
+                inst = self.view.instructions.get(use_line)
+                label = _instruction_label(
+                    inst,
+                    self.options,
+                    self.document.allocs,
+                    use_line,
+                    self.options.show_alloc_sizes,
+                    self.options.show_left_types,
+                    self.view.ws_rt_io,
+                    None,
+                    self.options.show_source_vars,
+                    False,
+                ) if inst else self.document.lines[use_line].strip()
+                entry = (_make_label("User", f"{def_value} → {label}", "magenta"), use_line)
+                if ("user", use_line) not in seen:
+                    items.append(entry)
+                    seen.add(("user", use_line))
+
+        for producer, label in (
+            (instruction.semaphore_unblocker, "Producer (sem)"),
+            (instruction.num_rx_unblocker, "Producer (data)"),
+        ):
+            if producer is None:
+                continue
+            inst = self.view.instructions.get(producer)
+            line_label = _instruction_label(
+                inst,
+                self.options,
+                self.document.allocs,
+                producer,
+                self.options.show_alloc_sizes,
+                self.options.show_left_types,
+                self.view.ws_rt_io,
+                None,
+                self.options.show_source_vars,
+                False,
+            ) if inst else self.document.lines[producer].strip()
+            entry = (_make_label("Producer", line_label, "green"), producer)
+            if ("producer", producer) not in seen:
+                items.append(entry)
+                seen.add(("producer", producer))
+
+        for consumer in instruction.semaphore_consumers:
+            inst = self.view.instructions.get(consumer)
+            line_label = _instruction_label(
+                inst,
+                self.options,
+                self.document.allocs,
+                consumer,
+                self.options.show_alloc_sizes,
+                self.options.show_left_types,
+                self.view.ws_rt_io,
+                None,
+                self.options.show_source_vars,
+                False,
+            ) if inst else self.document.lines[consumer].strip()
+            entry = (_make_label("Consumer", line_label, "yellow"), consumer)
+            if ("consumer", consumer) not in seen:
+                items.append(entry)
+                seen.add(("consumer", consumer))
+
+        for consumer in instruction.num_rx_consumers:
+            inst = self.view.instructions.get(consumer)
+            line_label = _instruction_label(
+                inst,
+                self.options,
+                self.document.allocs,
+                consumer,
+                self.options.show_alloc_sizes,
+                self.options.show_left_types,
+                self.view.ws_rt_io,
+                None,
+                self.options.show_source_vars,
+                False,
+            ) if inst else self.document.lines[consumer].strip()
+            entry = (_make_label("Consumer", line_label, "yellow"), consumer)
+            if ("consumer", consumer) not in seen:
+                items.append(entry)
+                seen.add(("consumer", consumer))
+
+        if not items:
+            return
+        order_by_source: dict[int, int] = {}
+        for idx, entry in enumerate(self._flat_entries):
+            if entry.node.source_index is None:
+                continue
+            order_by_source.setdefault(entry.node.source_index, idx)
+        items.sort(key=lambda item: (order_by_source.get(item[1], 10**9), item[1]))
+        self.push_screen(QuickJumpScreen(items), self._apply_quick_jump)
+
+    def _apply_quick_jump(self, line_idx: int | None) -> None:
+        if line_idx is None:
+            return
+        self._jump_to_index(line_idx)
 
     def action_focus_details(self) -> None:
         details = self.query_one("#details", RichLog)
@@ -1346,7 +1523,16 @@ class IRViewerApp(App):
     def _jump_to_index(self, index: int | None) -> None:
         if index is None or not self._flat_entries:
             return
-        self._set_selected_index(index)
+        target = None
+        for idx, entry in enumerate(self._flat_entries):
+            if entry.node.source_index == index:
+                target = idx
+                break
+        if target is None:
+            return
+        if self.options.split_axis_view:
+            self._split_focus_side = self._entry_axis_side(self._flat_entries[target])
+        self._set_selected_index(target)
 
     def _select_func(self, selection: int | None) -> None:
         if selection is None:
@@ -1845,6 +2031,91 @@ class FileSelectScreen(ModalScreen[int]):
     def on_key(self, event: events.Key) -> None:
         if event.key == "q":
             self.app.exit()
+            event.stop()
+
+
+class QuickJumpScreen(ModalScreen[int | None]):
+    CSS = """
+    QuickJumpScreen {
+        align: center middle;
+    }
+
+    #jump-panel {
+        width: 80%;
+        height: 80%;
+        border: round $accent;
+        padding: 1 2;
+        background: $surface;
+    }
+    """
+
+    def __init__(self, items: list[tuple[Text, int]]) -> None:
+        super().__init__()
+        self.items = items
+
+    def compose(self) -> ComposeResult:
+        items: list[ListItem] = []
+        for idx, (label, line_idx) in enumerate(self.items):
+            item = ListItem(Label(label))
+            item._jump_index = idx  # type: ignore[attr-defined]
+            items.append(item)
+        with Vertical(id="jump-panel"):
+            yield Label("Quick jump")
+            yield ListView(*items, id="jump-list")
+            yield Label("j/k, ↑/↓, C-n/C-p, PgUp/PgDn, g/G; Enter = jump, Esc = cancel")
+
+    def _move_jump_cursor(self, delta: int) -> None:
+        jump_list = self.query_one("#jump-list", ListView)
+        count = len(jump_list.children)
+        if count <= 0:
+            return
+        current = jump_list.index if jump_list.index is not None else 0
+        target = max(0, min(count - 1, current + delta))
+        jump_list.index = target
+
+    def _set_jump_cursor(self, index: int) -> None:
+        jump_list = self.query_one("#jump-list", ListView)
+        count = len(jump_list.children)
+        if count <= 0:
+            return
+        jump_list.index = max(0, min(count - 1, index))
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        item = event.item
+        index = getattr(item, "_jump_index", None)
+        if index is None:
+            self.dismiss(None)
+            return
+        line_idx = self.items[index][1]
+        self.dismiss(line_idx)
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            self.dismiss(None)
+            event.stop()
+            return
+        if event.key in {"down", "j", "ctrl+n"}:
+            self._move_jump_cursor(1)
+            event.stop()
+            return
+        if event.key in {"up", "k", "ctrl+p"}:
+            self._move_jump_cursor(-1)
+            event.stop()
+            return
+        if event.key in {"pagedown", "ctrl+v"}:
+            self._move_jump_cursor(10)
+            event.stop()
+            return
+        if event.key in {"pageup", "ctrl+u", "alt+v"}:
+            self._move_jump_cursor(-10)
+            event.stop()
+            return
+        if event.key in {"home", "g"}:
+            self._set_jump_cursor(0)
+            event.stop()
+            return
+        if event.key in {"end", "G"}:
+            self._set_jump_cursor(10_000)
             event.stop()
 
 

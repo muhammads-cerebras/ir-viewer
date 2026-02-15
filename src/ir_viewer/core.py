@@ -13,7 +13,7 @@ _LOC_RE = re.compile(r"^\s*(#loc\d+)\s*=\s*(.*)$")
 _ALLOC_RE = re.compile(r"^\s*(%\d+)\s*=\s*ws_rt\.cmdh\.waf\.alloc\b(.*)$")
 _LAYOUT_REF_RE = re.compile(r"layout\s*=\s*(#layout\d+)")
 _LOC_REF_RE = re.compile(r"loc\((#loc\d+)\)")
-_SSA_RE = re.compile(r"%\d+")
+_SSA_RE = re.compile(r"%[A-Za-z0-9_][A-Za-z0-9_$.]*")
 
 
 @dataclass(frozen=True)
