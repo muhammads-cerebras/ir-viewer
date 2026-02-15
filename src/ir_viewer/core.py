@@ -133,6 +133,7 @@ class RenderOptions:
     group_loc_prefixes: bool = False
     show_only_tx_rx: bool = False
     split_axis_view: bool = False
+    highlight_non_simple_srctgt: bool = True
 
 
 class DocumentView:
@@ -269,7 +270,7 @@ class DocumentView:
         parts.append("Original instruction")
         parts.append(instruction.raw if instruction else line.rstrip())
 
-        return _highlight_details("\n".join(parts))
+        return _highlight_details("\n".join(parts), self.options.highlight_non_simple_srctgt)
         layout_text = _resolve_ref(line, _LAYOUT_REF_RE, self.document.layouts)
         if not layout_text:
             layout_text = _extract_inline_layout(line)
@@ -1755,7 +1756,12 @@ def _format_layout_section(
     lines: List[str] = []
     for layout_info, values in grouped.items():
         labeled = []
+        seen_labels: set[tuple[str, Optional[str]]] = set()
         for value, layout_type in values:
+            key = (value, layout_type)
+            if key in seen_labels:
+                continue
+            seen_labels.add(key)
             if layout_type:
                 labeled.append(f"{value} ({layout_type})")
             else:
@@ -1917,7 +1923,7 @@ def _format_source_var(value: str) -> str:
     return " ← ".join(reversed(parts))
 
 
-def _highlight_details(text: str) -> Text:
+def _highlight_details(text: str, highlight_non_simple_srctgt: bool = True) -> Text:
     if not text:
         return Text("")
     raw_lines = text.splitlines()
@@ -1950,6 +1956,12 @@ def _highlight_details(text: str) -> Text:
                 rendered.stylize("cyan", offset + match.start(), offset + match.end())
             for match in re.finditer(r"\([^\)]*\)", line):
                 rendered.stylize("magenta", offset + match.start(), offset + match.end())
+            size_matches = list(re.finditer(r"\(([^\)]*)\)", line))
+            if highlight_non_simple_srctgt and len(size_matches) >= 2:
+                src_size = size_matches[0].group(1).strip().replace(" ", "")
+                tgt_size = size_matches[1].group(1).strip().replace(" ", "")
+                if src_size and tgt_size and src_size != tgt_size:
+                    rendered.stylize("on rgb(55,50,35)", offset, offset + len(line))
             tgt_match = re.search(r"→\s*(\[[^\]]*\])", line)
             if tgt_match:
                 tgt_start = offset + tgt_match.start(1)

@@ -821,7 +821,7 @@ class IRViewerApp(App):
                 insert_at = 3 if len(lines) >= 3 else len(lines)
                 for offset, line in enumerate(extra_lines):
                     lines.insert(insert_at + offset, line)
-                text = _highlight_details("\n".join(lines))
+                text = _highlight_details("\n".join(lines), self.options.highlight_non_simple_srctgt)
         details.write(text)
         self._details_lines = text.plain.splitlines()
 
@@ -1625,6 +1625,9 @@ class IRViewerApp(App):
         self.options.show_left_loc = values.get("show_left_loc", self.options.show_left_loc)
         self.options.show_only_tx_rx = values.get("show_only_tx_rx", self.options.show_only_tx_rx)
         self.options.split_axis_view = values.get("split_axis_view", self.options.split_axis_view)
+        self.options.highlight_non_simple_srctgt = values.get(
+            "highlight_non_simple_srctgt", self.options.highlight_non_simple_srctgt
+        )
         list_view = self.query_one("#list", RichLog)
         list_view.wrap = False if self.options.split_axis_view else self.options.wrap_left_panel
         self._render_list()
@@ -2189,6 +2192,12 @@ class ToggleScreen(ModalScreen[dict[str, bool] | None]):
         ("j", "Align columns", "align_left_panel", "align_left_panel"),
         ("k", "Show loc suffix", "show_left_loc", "show_left_loc"),
         ("l", "Split axis view", "split_axis_view", "split_axis_view"),
+        (
+            "m",
+            "Highlight non-simple src/tgt",
+            "highlight_non_simple_srctgt",
+            "highlight_non_simple_srctgt",
+        ),
     ]
 
     def __init__(self, options: RenderOptions) -> None:
@@ -2219,6 +2228,9 @@ class ToggleScreen(ModalScreen[dict[str, bool] | None]):
             "align_left_panel": self.query_one("#align_left_panel", Checkbox).value,
             "show_left_loc": self.query_one("#show_left_loc", Checkbox).value,
             "split_axis_view": self.query_one("#split_axis_view", Checkbox).value,
+            "highlight_non_simple_srctgt": self.query_one(
+                "#highlight_non_simple_srctgt", Checkbox
+            ).value,
         }
         self.dismiss(values)
 
@@ -2652,6 +2664,12 @@ def main() -> None:
     parser.add_argument("--group-loc-prefixes", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--align-left-panel", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--show-left-loc", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument(
+        "--highlight-non-simple-srctgt",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Highlight layout SrcTgts lines where source and target sizes differ",
+    )
     parsed = parser.parse_args()
 
     profile_mode = parsed.profile
@@ -2689,6 +2707,8 @@ def main() -> None:
         options.align_left_panel = parsed.align_left_panel
     if parsed.show_left_loc is not None:
         options.show_left_loc = parsed.show_left_loc
+    if parsed.highlight_non_simple_srctgt is not None:
+        options.highlight_non_simple_srctgt = parsed.highlight_non_simple_srctgt
     app = IRViewerApp(
         path,
         profile_mode=profile_mode,
