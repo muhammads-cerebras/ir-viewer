@@ -587,6 +587,16 @@ def _is_scratch_alloc(alloc: Optional[AllocInfo]) -> bool:
     return any("scratch" in extra.lower() for extra in alloc.extras)
 
 
+def _operand_segment_sizes(attrs: Optional[str]) -> Optional[List[int]]:
+    if not attrs:
+        return None
+    match = re.search(r"\boperand_segment_sizes\b\s*=\s*dense<\[([^\]]*)\]>", attrs)
+    if not match:
+        return None
+    values = [int(v) for v in re.findall(r"-?\d+", match.group(1))]
+    return values if values else None
+
+
 def _compute_ws_rt_io(
     lines: List[str],
     allocs: Dict[str, List[AllocInfo]],
@@ -621,9 +631,71 @@ def _compute_ws_rt_io(
                 type_text = arg_types[pos] if pos < len(arg_types) else ""
                 if "handle" in type_text:
                     handle_operands.add(value)
+
+            segment_sizes = _operand_segment_sizes(instruction.attrs)
+            if segment_sizes and len(segment_sizes) >= 2:
+                out_like_count = max(0, min(segment_sizes[0], len(operands)))
+                in_count = max(0, min(segment_sizes[1], len(operands) - out_like_count))
+                first_group = operands[:out_like_count]
+                second_group = operands[out_like_count : out_like_count + in_count]
+                tail_group = operands[out_like_count + in_count :]
+
+                outputs: List[str] = []
+                inputs: List[str] = []
+
+                for value in first_group:
+                    alloc = _alloc_for_value(allocs, value, idx)
+                    if value in handle_operands or _is_scratch_alloc(alloc):
+                        if value not in inputs:
+                            inputs.append(value)
+                        continue
+                    if value not in outputs:
+                        outputs.append(value)
+
+                for value in second_group + tail_group:
+                    if value not in inputs:
+                        inputs.append(value)
+
+                is_cast_inst = "cast" in instruction.inst
+                for value in outputs:
+                    last_def[value] = idx
+                    last_def_is_cast[value] = is_cast_inst
+                ws_rt_io[idx] = (outputs, inputs)
+                continue
+
             counts: Dict[str, int] = {}
             for value in operands:
                 counts[value] = counts.get(value, 0) + 1
+
+            # Common ws_rt.cmdh in-place pattern: first data operand is destination and
+            # appears again as an input (e.g. sub %dst, %dst, %src). In that case,
+            # force a single output on the destination to avoid misclassifying other
+            # operands as outputs.
+            first_data_operand = None
+            for value in operands:
+                if value in handle_operands:
+                    continue
+                alloc = _alloc_for_value(allocs, value, idx)
+                if _is_scratch_alloc(alloc):
+                    continue
+                first_data_operand = value
+                break
+            if (
+                instruction.inst.startswith("ws_rt.cmdh.")
+                and first_data_operand is not None
+                and counts.get(first_data_operand, 0) > 1
+            ):
+                outputs = [first_data_operand]
+                inputs: List[str] = []
+                for value in operands:
+                    if value not in inputs:
+                        inputs.append(value)
+                is_cast_inst = "cast" in instruction.inst
+                last_def[first_data_operand] = idx
+                last_def_is_cast[first_data_operand] = is_cast_inst
+                ws_rt_io[idx] = (outputs, inputs)
+                continue
+
             candidate_outputs: set[str] = set()
             is_cast_inst = "cast" in instruction.inst
             for value in operands:
@@ -1955,7 +2027,10 @@ def _parse_type_signature(type_sig: str, result_count: int, operand_count: int) 
 
     arrow_idx = _find_top_level_arrow(type_sig)
     if arrow_idx is None:
-        parts = [t.strip() for t in _split_top_level(type_sig, ",") if t.strip()]
+        base = type_sig.strip()
+        if base.startswith("(") and base.endswith(")"):
+            base = base[1:-1].strip()
+        parts = [t.strip() for t in _split_top_level(base, ",") if t.strip()]
         if not parts:
             return [], [], None
         if result_count <= 0:
