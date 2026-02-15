@@ -1767,8 +1767,58 @@ def _format_layout_section(
             else:
                 labeled.append(value)
         lines.append(f"{', '.join(labeled)}:")
-        lines.extend([f"  {line}" for line in layout_info.splitlines()])
+        lines.extend([f"  {_annotate_perm_func_enum(line)}" for line in layout_info.splitlines()])
     return lines
+
+
+def _annotate_perm_func_enum(line: str) -> str:
+    func_enum = {
+        "0": "IDENTITY",
+        "1": "SNAKE",
+        "2": "MIDDLE",
+        "3": "SHIFTEDSNAKE",
+        "4": "OFFSET",
+        "5": "FOLDEDHALF8",
+        "6": "CONTIGHALF8",
+        "7": "PAIRWISE8",
+        "8": "CONTIGPAIRWISE8",
+        "9": "MSEPAIRWISE8",
+        "10": "ROOTCOMPLEMENT",
+        "11": "MIDDLECOMPLEMENT",
+        "12": "DIAGONAL",
+    }
+
+    def repl(match: re.Match[str]) -> str:
+        value = match.group(1)
+        name = func_enum.get(value)
+        if not name:
+            return match.group(0)
+        return f"Func : {name}"
+
+    line = re.sub(r"\bFunc\s*:\s*(-?\d+)\b", repl, line)
+
+    def merge_arg_first(match: re.Match[str]) -> str:
+        arg = match.group(1).strip()
+        func = match.group(2).strip()
+        return f"Func : {func}<{arg}>"
+
+    def merge_func_first(match: re.Match[str]) -> str:
+        func = match.group(1).strip()
+        arg = match.group(2).strip()
+        return f"Func : {func}<{arg}>"
+
+    line = re.sub(
+        r"\bArg\s*:\s*([^,]+)\s*,\s*Func\s*:\s*([A-Za-z_][A-Za-z0-9_]*)",
+        merge_arg_first,
+        line,
+    )
+    line = re.sub(
+        r"\bFunc\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*,\s*Arg\s*:\s*([^,]+)",
+        merge_func_first,
+        line,
+    )
+
+    return line
 
 
 def _extract_attr_value(attrs_text: str, key: str) -> Optional[str]:
