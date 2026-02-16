@@ -1669,7 +1669,12 @@ def _instruction_label(
         typed_operands = ", ".join(
             _format_typed_values(operands, arg_types, allocs, line_index, show_alloc_sizes, show_types, is_arg=True)
         )
-        base = f"{iter_marker}{onxy_prefix}{typed_results} = {inst_name} {typed_operands}".rstrip()
+        rhs = inst_name
+        if typed_operands:
+            rhs = f"{rhs} {typed_operands}".rstrip()
+        if const_value:
+            rhs = f"{rhs} [{const_value}]".rstrip()
+        base = f"{iter_marker}{onxy_prefix}{typed_results} = {rhs}".rstrip()
         return _append_source_vars(base, source_vars, show_source_vars, show_full_source_vars)
     base = f"{iter_marker}{onxy_prefix}{inst_name} {operands_display}".rstrip()
     return _append_source_vars(base, source_vars, show_source_vars, show_full_source_vars)
