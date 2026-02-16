@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$ROOT_DIR"
+CALL_DIR="$(pwd)"
 
 UV_BIN="$ROOT_DIR/.uv/uv"
 if [[ ! -x "$UV_BIN" ]]; then
@@ -12,12 +12,21 @@ if [[ ! -x "$UV_BIN" ]]; then
 fi
 export PATH="$ROOT_DIR/.uv:$PATH"
 
-if [[ ! -d ".venv" ]]; then
+if [[ ! -d "$ROOT_DIR/.venv" ]]; then
   echo "Setting up environment (uv sync)..."
-  uv sync
+  "$UV_BIN" sync --project "$ROOT_DIR"
 fi
 
-IR_PATH="${1:-$ROOT_DIR/ir.mlir}"
-shift || true
+IR_PATH=""
+if [[ $# -gt 0 && "${1:-}" != -* ]]; then
+  if [[ "$1" = /* ]]; then
+    IR_PATH="$1"
+  else
+    IR_PATH="$CALL_DIR/$1"
+  fi
+  shift || true
+else
+  IR_PATH="$CALL_DIR/ir.mlir"
+fi
 
-uv run ir-viewer "$IR_PATH" "$@"
+"$UV_BIN" run --project "$ROOT_DIR" ir-viewer "$IR_PATH" "$@"

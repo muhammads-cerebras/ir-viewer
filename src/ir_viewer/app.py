@@ -2811,9 +2811,34 @@ def _is_zero_literal(value: str) -> bool:
 
 
 def _default_ir_path() -> Path:
-    workspace = Path(__file__).resolve().parents[3]
-    candidate = workspace / "ir.mlir"
-    return candidate
+    return Path.cwd() / "ir.mlir"
+
+
+def _ir_not_found_message(path: Path, requested: str | None = None) -> str:
+    resolved = path.expanduser().resolve(strict=False)
+    lines = [
+        f"IR file not found: {path}",
+        f"Resolved path: {resolved}",
+        f"Current working directory: {Path.cwd()}",
+        f"Requested argument: {requested or str(path)}",
+    ]
+
+    seen: set[Path] = set()
+    search_dirs: list[Path] = [Path.cwd(), path.parent, _default_ir_path().parent]
+    for directory in search_dirs:
+        directory = directory.resolve(strict=False)
+        if directory in seen or not directory.exists() or not directory.is_dir():
+            continue
+        seen.add(directory)
+        mlir_files = sorted(directory.glob("*.mlir"))
+        if not mlir_files:
+            continue
+        preview = ", ".join(candidate.name for candidate in mlir_files[:8])
+        if len(mlir_files) > 8:
+            preview += f", ... (+{len(mlir_files) - 8} more)"
+        lines.append(f"Available .mlir files in {directory}: {preview}")
+
+    return "\n".join(lines)
 
 
 def _cursor_row(cursor_location) -> int:
@@ -2855,10 +2880,13 @@ def main() -> None:
         file_root = path
         file_choices = sorted(path.glob("*.mlir"))
         if not file_choices:
-            raise SystemExit(f"No .mlir files found in directory: {path}")
+            raise SystemExit(
+                f"No .mlir files found in directory: {path}\n"
+                f"Current working directory: {Path.cwd()}"
+            )
         path = file_choices[0]
     if not path.exists():
-        raise SystemExit(f"IR file not found: {path}")
+        raise SystemExit(_ir_not_found_message(path, parsed.path))
     options = RenderOptions()
     if parsed.show_alloc_free is not None:
         options.show_alloc_free = parsed.show_alloc_free
