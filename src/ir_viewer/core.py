@@ -13,7 +13,7 @@ _LOC_RE = re.compile(r"^\s*(#loc\d+)\s*=\s*(.*)$")
 _ALLOC_RE = re.compile(r"^\s*(%\d+)\s*=\s*ws_rt\.cmdh\.waf\.alloc\b(.*)$")
 _LAYOUT_REF_RE = re.compile(r"layout\s*=\s*(#layout\d+)")
 _LOC_REF_RE = re.compile(r"loc\((#loc\d+)\)")
-_SSA_RE = re.compile(r"%[A-Za-z0-9_][A-Za-z0-9_$.]*")
+_SSA_RE = re.compile(r"%[A-Za-z0-9_][A-Za-z0-9_$.]*(?:#\d+)?")
 
 
 @dataclass(frozen=True)
@@ -251,10 +251,14 @@ class DocumentView:
                 parts.append("")
                 parts.append("Allocations")
                 parts.extend(alloc_lines)
-            layout_values = _operand_values(instruction.operands)
-            layout_types = list(instruction.arg_types)
-            if instruction.uniform_type and len(layout_types) < len(layout_values):
-                layout_types = layout_types + [instruction.uniform_type] * (len(layout_values) - len(layout_types))
+            if instruction.inst.startswith("ws_rt."):
+                layout_values = _operand_values(instruction.operands)
+                layout_types = list(instruction.arg_types)
+                if instruction.uniform_type and len(layout_types) < len(layout_values):
+                    layout_types = layout_types + [instruction.uniform_type] * (len(layout_values) - len(layout_types))
+            else:
+                layout_values = _split_values(instruction.results) + _operand_values(instruction.operands)
+                layout_types = list(res_types) + list(arg_types)
             layout_lines = _format_layout_section(
                 layout_values,
                 layout_types,
@@ -340,9 +344,17 @@ class DocumentView:
                 parts.append("")
                 parts.append("Allocations")
                 parts.extend(alloc_lines)
+            if instruction.inst.startswith("ws_rt."):
+                layout_values = _operand_values(instruction.operands)
+                layout_types = list(instruction.arg_types)
+                if instruction.uniform_type and len(layout_types) < len(layout_values):
+                    layout_types = layout_types + [instruction.uniform_type] * (len(layout_values) - len(layout_types))
+            else:
+                layout_values = _split_values(instruction.results) + _operand_values(instruction.operands)
+                layout_types = list(res_types) + list(arg_types)
             layout_lines = _format_layout_section(
-                res_buffers,
-                arg_buffers,
+                layout_values,
+                layout_types,
                 layout_text,
             )
             if layout_lines:
@@ -757,7 +769,7 @@ def _compute_ws_rt_io(
                 last_def_is_cast[value] = is_cast_inst
             ws_rt_io[idx] = (outputs, inputs)
         else:
-            for value in _split_values(instruction.results):
+            for value in _expanded_result_values(instruction.results):
                 if value:
                     last_def[value] = idx
     return ws_rt_io
@@ -2188,6 +2200,22 @@ def _split_values(text: str) -> List[str]:
     if not text:
         return []
     return [part.strip() for part in _split_top_level(text, ",") if part.strip()]
+
+
+def _expanded_result_values(text: str) -> List[str]:
+    expanded: List[str] = []
+    for part in _split_values(text):
+        match = re.match(r"^(%[A-Za-z0-9_][A-Za-z0-9_$.]*)\s*:\s*(\d+)\s*$", part)
+        if match:
+            base = match.group(1)
+            count = int(match.group(2))
+            if count > 0:
+                expanded.append(base)
+                for idx in range(count):
+                    expanded.append(f"{base}#{idx}")
+                continue
+        expanded.append(part)
+    return expanded
 
 
 def _operand_values(text: str) -> List[str]:

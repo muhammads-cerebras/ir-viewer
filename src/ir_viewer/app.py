@@ -20,6 +20,7 @@ from .core import (
     Node,
     NodeData,
     _split_values,
+    _expanded_result_values,
     _operand_values,
     _alloc_for_value,
     _brace_delta,
@@ -1798,7 +1799,7 @@ class IRViewerApp(App):
                         self.def_map.setdefault(value, []).append(line_idx)
                         def_container_by_line[line_idx] = container_id
             else:
-                defs = _split_values(instruction.results)
+                defs = _expanded_result_values(instruction.results)
                 uses = _operand_values(instruction.operands)
                 for value in uses:
                     alloc = _alloc_for_value(self.document.allocs, value, line_idx)
@@ -1827,7 +1828,7 @@ class IRViewerApp(App):
         uses = _operand_values(instruction.operands)
         if instruction.inst.startswith("ws_rt."):
             return [], uses
-        return _split_values(instruction.results), uses
+        return _expanded_result_values(instruction.results), uses
 
     def _lookup_def_line(
         self,
