@@ -257,6 +257,18 @@ class IRViewerApp(App):
         list_view.refresh(layout=True)
         details.refresh(layout=True)
 
+    def _ensure_details_visible(self) -> None:
+        details = self.query_one("#details", RichLog)
+        if details.display:
+            return
+        details.display = True
+        if not self._zoom_details:
+            list_view = self.query_one("#list", RichLog)
+            list_view.wrap = self.options.wrap_left_panel
+            list_view.refresh(layout=True)
+        details.refresh(layout=True)
+        self.call_after_refresh(self._render_list)
+
     def action_toggle_left_wrap(self) -> None:
         self.options.wrap_left_panel = not self.options.wrap_left_panel
         list_view = self.query_one("#list", RichLog)
@@ -1778,6 +1790,7 @@ class IRViewerApp(App):
                         continue
                     if not _fuzzy_match(value_needle, attr_value):
                         continue
+                self._ensure_details_visible()
                 self._set_selected_index(idx)
                 return
 
