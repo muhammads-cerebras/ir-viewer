@@ -12,6 +12,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Footer, Header, RichLog, ListView, ListItem, Label, Checkbox, Input
 from rich.text import Text
 from textual.binding import Binding
+from textual_autocomplete import AutoComplete, DropdownItem
 
 from .core import (
     Document,
@@ -2353,91 +2354,69 @@ class AttrSearchScreen(ModalScreen[dict[str, str | None] | None]):
         background: $surface;
     }
 
-    #attr-list {
-        height: 1fr;
-    }
     """
 
     def __init__(self, attr_items: list[tuple[str, str | None]]) -> None:
         super().__init__()
-        self._all_attr_items = attr_items
+        self._unique_values: dict[str, str] = {}
+        self._autofilled_attr: str | None = None
+        self._autofilled_value: str | None = None
+        self._dropdown_items: list[DropdownItem] = []
+        for name, peek in attr_items:
+            normalized_peek = None
+            if peek is not None:
+                normalized_peek = " ".join(peek.split())
+                self._unique_values[name] = peek
+            prefix = None
+            if normalized_peek is not None and self._should_show_value_preview(normalized_peek):
+                prefix = f"= {normalized_peek}  "
+            self._dropdown_items.append(DropdownItem(main=name, prefix=prefix))
+
+    @staticmethod
+    def _should_show_value_preview(value: str) -> bool:
+        if len(value) > 48:
+            return False
+        if any(ch in value for ch in "{}[]"):
+            return False
+        return True
 
     def compose(self) -> ComposeResult:
         with Vertical(id="attr-panel"):
             yield Label("Attribute search")
-            yield Input(placeholder="Attribute name (fuzzy, e.g. sq, atrn)", id="attr_input")
+            attr_input = Input(placeholder="Attribute name (fuzzy, e.g. sq, atrn)", id="attr_input")
+            yield attr_input
+            yield AutoComplete(target=attr_input, candidates=self._dropdown_items)
             yield Input(placeholder="Optional value (fuzzy)", id="attr_value")
-            yield ListView(id="attr-list")
             yield Label("Enter = search, Esc = cancel")
 
     def on_mount(self) -> None:
         self.query_one("#attr_input", Input).focus()
-        self._refresh_attr_list()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "attr_input":
-            self._refresh_attr_list()
-
-    def on_list_view_selected(self, event: ListView.Selected) -> None:
-        chosen = getattr(event.item, "_attr_name", None)
-        if not chosen:
-            return
-        value_input = self.query_one("#attr_value", Input)
-        self.dismiss({"attr": chosen, "value": value_input.value.strip()})
-
-    def _refresh_attr_list(self) -> None:
-        query = self.query_one("#attr_input", Input).value.strip()
-        if query:
-            filtered = [
-                (name, peek)
-                for name, peek in self._all_attr_items
-                if _fuzzy_match(query, name)
-            ]
-        else:
-            filtered = list(self._all_attr_items)
-        list_view = self.query_one("#attr-list", ListView)
-        list_view.clear()
-        for name, peek in filtered[:500]:
-            display = name
-            if peek is not None:
-                display = f"{name} = {peek}"
-            if len(display) > 220:
-                display = display[:217] + "..."
-            item = ListItem(Label(display))
-            item._attr_name = name  # type: ignore[attr-defined]
-            list_view.append(item)
-        list_view.index = 0 if filtered else None
-
-    def _selected_attr_name(self) -> str | None:
-        list_view = self.query_one("#attr-list", ListView)
-        if list_view.highlighted_child is None:
-            return None
-        return getattr(list_view.highlighted_child, "_attr_name", None)
+            attr_name = event.value.strip()
+            value_input = self.query_one("#attr_value", Input)
+            unique_value = self._unique_values.get(attr_name)
+            if unique_value is not None:
+                value_input.value = unique_value
+                self._autofilled_attr = attr_name
+                self._autofilled_value = unique_value
+            elif (
+                self._autofilled_attr is not None
+                and value_input.value == (self._autofilled_value or "")
+            ):
+                value_input.value = ""
+                self._autofilled_attr = None
+                self._autofilled_value = None
+        elif event.input.id == "attr_value":
+            if self._autofilled_value is not None and event.value != self._autofilled_value:
+                self._autofilled_attr = None
+                self._autofilled_value = None
 
     def on_key(self, event: events.Key) -> None:
-        if event.key in {"down", "ctrl+n"}:
-            list_view = self.query_one("#attr-list", ListView)
-            count = len(list_view.children)
-            if count > 0:
-                current = list_view.index if list_view.index is not None else 0
-                list_view.index = min(count - 1, current + 1)
-            event.stop()
-            return
-        if event.key in {"up", "ctrl+p"}:
-            list_view = self.query_one("#attr-list", ListView)
-            count = len(list_view.children)
-            if count > 0:
-                current = list_view.index if list_view.index is not None else 0
-                list_view.index = max(0, current - 1)
-            event.stop()
-            return
         if event.key == "enter":
             value_input = self.query_one("#attr_value", Input)
             chosen = self.query_one("#attr_input", Input).value.strip()
-            if not chosen:
-                selected = self._selected_attr_name()
-                if selected:
-                    chosen = selected
             if not chosen:
                 event.stop()
                 return
