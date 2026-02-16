@@ -65,6 +65,7 @@ class IRViewerApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("i", "toggle_details", "More info"),
+        Binding("z", "toggle_zoom", "Zoom details"),
         Binding("f", "open_jump", "Switch function"),
         Binding("enter", "open_quick_jump", "Quick jump", show=False),
         Binding("o", "open_toggles", "Options"),
@@ -145,6 +146,8 @@ class IRViewerApp(App):
         self._last_attr_search: tuple[str, str | None] | None = None
         self._last_list_width: int | None = None
         self._split_focus_side: str = "left"
+        self._zoom_details: bool = False
+        self._zoom_prev_details_visible: bool = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -202,12 +205,24 @@ class IRViewerApp(App):
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
         return
 
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        widget = event.widget
+        if isinstance(widget, RichLog):
+            if widget.id == "list":
+                self._focus_target = "list"
+                return
+            if widget.id == "details":
+                self._focus_target = "details"
+                return
+
     def _apply_pending_highlight(self) -> None:
         if self._pending_highlight is None:
             return
         self._update_related_highlights(self._pending_highlight)
 
     def action_toggle_details(self) -> None:
+        if self._zoom_details:
+            return
         details = self.query_one("#details", RichLog)
         details.display = not details.display
         list_view = self.query_one("#list", RichLog)
@@ -218,6 +233,29 @@ class IRViewerApp(App):
         if not details.display:
             self._focus_target = "list"
             self.query_one("#list", RichLog).focus()
+
+    def action_toggle_zoom(self) -> None:
+        list_view = self.query_one("#list", RichLog)
+        details = self.query_one("#details", RichLog)
+        if not self._zoom_details:
+            self._zoom_prev_details_visible = bool(details.display)
+            list_view.display = False
+            details.display = True
+            self._zoom_details = True
+            self._focus_target = "details"
+            details.focus()
+        else:
+            list_view.display = True
+            details.display = self._zoom_prev_details_visible
+            self._zoom_details = False
+            if details.display:
+                self._focus_target = "details"
+                details.focus()
+            else:
+                self._focus_target = "list"
+                list_view.focus()
+        list_view.refresh(layout=True)
+        details.refresh(layout=True)
 
     def action_toggle_left_wrap(self) -> None:
         self.options.wrap_left_panel = not self.options.wrap_left_panel
@@ -332,6 +370,7 @@ class IRViewerApp(App):
             ("f", "Jump section"),
             ("o", "Options"),
             ("i", "Toggle details panel"),
+            ("z", "Zoom details panel"),
             ("Enter", "Quick jump"),
             ("Space", "Select"),
             ("H", "Help"),
@@ -2717,7 +2756,7 @@ def main() -> None:
         file_choices=file_choices,
         file_root=file_root,
     )
-    app.run(headless=profile_mode)
+    app.run(headless=profile_mode, mouse=False)
 
 
 def _looks_like_type(token: str) -> bool:
