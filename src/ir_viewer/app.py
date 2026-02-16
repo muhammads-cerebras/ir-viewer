@@ -345,7 +345,34 @@ class IRViewerApp(App):
         search_bar.focus()
 
     def action_open_attr_search(self) -> None:
-        self.push_screen(AttrSearchScreen(), self._apply_attr_search)
+        self.push_screen(AttrSearchScreen(self._collect_attr_options()), self._apply_attr_search)
+
+    def _collect_attr_options(self) -> list[tuple[str, str | None]]:
+        names: set[str] = set()
+        values_by_key: dict[str, set[str]] = {}
+        for entry in self._flat_entries:
+            attr_sources: list[str] = []
+            if entry.node.source_index is not None:
+                instruction = self.view.instructions.get(entry.node.source_index)
+                if instruction and instruction.attrs:
+                    attr_sources.append(instruction.attrs)
+            if entry.node.attrs:
+                attr_sources.append(entry.node.attrs)
+            if not attr_sources:
+                continue
+            for attrs_source in attr_sources:
+                attrs = _parse_attrs_flat(attrs_source)
+                names.update(attrs.keys())
+                for key, value in attrs.items():
+                    if value is None:
+                        continue
+                    values_by_key.setdefault(key, set()).add(value)
+        options: list[tuple[str, str | None]] = []
+        for name in sorted(names, key=str.lower):
+            values = values_by_key.get(name)
+            peek = next(iter(values)) if values and len(values) == 1 else None
+            options.append((name, peek))
+        return options
 
     def action_open_help(self) -> None:
         self.push_screen(HelpScreen(self._help_items()))
@@ -1722,31 +1749,37 @@ class IRViewerApp(App):
         step = 1 if forward else -1
         start = self._selected_index + step
         total = len(self._flat_entries)
-        needle = attr.lower()
+        needle = attr.strip()
+        value_needle = value.strip() if value else None
         for offset in range(total):
             idx = (start + offset * step) % total
             entry = self._flat_entries[idx]
-            if entry.node.source_index is None:
+            attr_sources: list[str] = []
+            if entry.node.source_index is not None:
+                instruction = self.view.instructions.get(entry.node.source_index)
+                if instruction and instruction.attrs:
+                    attr_sources.append(instruction.attrs)
+            if entry.node.attrs:
+                attr_sources.append(entry.node.attrs)
+            if not attr_sources:
                 continue
-            instruction = self.view.instructions.get(entry.node.source_index)
-            if not instruction or not instruction.attrs:
-                continue
-            attrs = _parse_attrs_flat(instruction.attrs)
-            matched_key = None
-            for key in attrs.keys():
-                if needle == key.lower() or needle in key.lower():
-                    matched_key = key
-                    break
-            if not matched_key:
-                continue
-            attr_value = attrs.get(matched_key)
-            if value:
-                if attr_value is None:
+            for attrs_source in attr_sources:
+                attrs = _parse_attrs_flat(attrs_source)
+                matched_key = None
+                for key in attrs.keys():
+                    if _fuzzy_match(needle, key):
+                        matched_key = key
+                        break
+                if not matched_key:
                     continue
-                if value != attr_value:
-                    continue
-            self._set_selected_index(idx)
-            return
+                attr_value = attrs.get(matched_key)
+                if value_needle:
+                    if attr_value is None:
+                        continue
+                    if not _fuzzy_match(value_needle, attr_value):
+                        continue
+                self._set_selected_index(idx)
+                return
 
 
     def _prepare_details_matches(self, query: str) -> None:
@@ -2301,26 +2334,97 @@ class AttrSearchScreen(ModalScreen[dict[str, str | None] | None]):
 
     #attr-panel {
         width: 70%;
+        height: 70%;
         border: round $accent;
         padding: 1 2;
         background: $surface;
     }
+
+    #attr-list {
+        height: 1fr;
+    }
     """
+
+    def __init__(self, attr_items: list[tuple[str, str | None]]) -> None:
+        super().__init__()
+        self._all_attr_items = attr_items
 
     def compose(self) -> ComposeResult:
         with Vertical(id="attr-panel"):
             yield Label("Attribute search")
-            yield Input(placeholder="Attribute name (e.g. seq, a_transposed)", id="attr_input")
-            yield Input(placeholder="Optional value", id="attr_value")
+            yield Input(placeholder="Attribute name (fuzzy, e.g. sq, atrn)", id="attr_input")
+            yield Input(placeholder="Optional value (fuzzy)", id="attr_value")
+            yield ListView(id="attr-list")
             yield Label("Enter = search, Esc = cancel")
 
     def on_mount(self) -> None:
         self.query_one("#attr_input", Input).focus()
+        self._refresh_attr_list()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "attr_input":
+            self._refresh_attr_list()
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        chosen = getattr(event.item, "_attr_name", None)
+        if not chosen:
+            return
+        value_input = self.query_one("#attr_value", Input)
+        self.dismiss({"attr": chosen, "value": value_input.value.strip()})
+
+    def _refresh_attr_list(self) -> None:
+        query = self.query_one("#attr_input", Input).value.strip()
+        if query:
+            filtered = [
+                (name, peek)
+                for name, peek in self._all_attr_items
+                if _fuzzy_match(query, name)
+            ]
+        else:
+            filtered = list(self._all_attr_items)
+        list_view = self.query_one("#attr-list", ListView)
+        list_view.clear()
+        for name, peek in filtered[:500]:
+            display = name
+            if peek is not None:
+                display = f"{name} = {peek}"
+            if len(display) > 220:
+                display = display[:217] + "..."
+            item = ListItem(Label(display))
+            item._attr_name = name  # type: ignore[attr-defined]
+            list_view.append(item)
+        list_view.index = 0 if filtered else None
+
+    def _selected_attr_name(self) -> str | None:
+        list_view = self.query_one("#attr-list", ListView)
+        if list_view.highlighted_child is None:
+            return None
+        return getattr(list_view.highlighted_child, "_attr_name", None)
 
     def on_key(self, event: events.Key) -> None:
+        if event.key in {"down", "ctrl+n"}:
+            list_view = self.query_one("#attr-list", ListView)
+            count = len(list_view.children)
+            if count > 0:
+                current = list_view.index if list_view.index is not None else 0
+                list_view.index = min(count - 1, current + 1)
+            event.stop()
+            return
+        if event.key in {"up", "ctrl+p"}:
+            list_view = self.query_one("#attr-list", ListView)
+            count = len(list_view.children)
+            if count > 0:
+                current = list_view.index if list_view.index is not None else 0
+                list_view.index = max(0, current - 1)
+            event.stop()
+            return
         if event.key == "enter":
             value_input = self.query_one("#attr_value", Input)
             chosen = self.query_one("#attr_input", Input).value.strip()
+            if not chosen:
+                selected = self._selected_attr_name()
+                if selected:
+                    chosen = selected
             if not chosen:
                 event.stop()
                 return
@@ -2596,6 +2700,10 @@ def _axis_from_attrs(attrs: str | None) -> str | None:
 
 
 def _parse_attrs_flat(attrs: str) -> dict[str, str | None]:
+    return _parse_attrs_nested(attrs)
+
+
+def _parse_attrs_nested(attrs: str, prefix: str = "") -> dict[str, str | None]:
     text = attrs.strip()
     if text.startswith("{") and text.endswith("}"):
         text = text[1:-1].strip()
@@ -2606,13 +2714,27 @@ def _parse_attrs_flat(attrs: str) -> dict[str, str | None]:
             key, value = part.split("=", 1)
             key = key.strip()
             value = value.strip()
-            value = _strip_type_annotations(value)
-            if value.startswith('"') and value.endswith('"') and len(value) >= 2:
-                value = value[1:-1]
-            result[key] = value
+            full_key = f"{prefix}.{key}" if prefix else key
+            norm_value = _strip_type_annotations(value)
+            if norm_value.startswith('"') and norm_value.endswith('"') and len(norm_value) >= 2:
+                norm_value = norm_value[1:-1]
+            result[full_key] = norm_value
+            if value.startswith("{") and value.endswith("}"):
+                result.update(_parse_attrs_nested(value, full_key))
         else:
-            result[part.strip()] = None
+            key = part.strip()
+            full_key = f"{prefix}.{key}" if prefix else key
+            result[full_key] = None
     return result
+
+
+def _fuzzy_match(query: str, text: str) -> bool:
+    q = "".join(query.lower().split())
+    t = "".join(text.lower().split())
+    if not q:
+        return True
+    it = iter(t)
+    return all(ch in it for ch in q)
 
 
 def _filter_nodes_by_range(nodes: list[Node], start: int, end: int) -> list[Node]:
