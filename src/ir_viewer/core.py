@@ -2133,6 +2133,8 @@ def _highlight_details(text: str, highlight_non_simple_srctgt: bool = True) -> T
                 stride_end = offset + match.end(2)
                 rendered.stylize("cyan", dim_start, dim_end)
                 rendered.stylize("magenta", stride_start, stride_end)
+        for match in re.finditer(r"\bFunc\s*:\s*([A-Za-z_][A-Za-z0-9_]*(?:<[^>]+>)?)", line):
+            rendered.stylize("orange1", offset + match.start(1), offset + match.end(1))
         if "Shape:" in line and "→" in line:
             arrow_idx = line.find("→")
             if arrow_idx != -1:
