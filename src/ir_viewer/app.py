@@ -9,7 +9,7 @@ from textual.app import App, ComposeResult
 from textual import events
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Footer, Header, RichLog, ListView, ListItem, Label, Checkbox, Input
+from textual.widgets import Footer, Header, RichLog, ListView, ListItem, Label, Checkbox, Input, DataTable
 from rich.text import Text
 from textual.binding import Binding
 from textual_autocomplete import AutoComplete, DropdownItem
@@ -67,6 +67,7 @@ class IRViewerApp(App):
         Binding("q", "quit", "Quit"),
         Binding("i", "toggle_details", "More info"),
         Binding("z", "toggle_zoom", "Zoom details"),
+        Binding("r", "open_report", "Histogram report"),
         Binding("f", "open_jump", "Switch function"),
         Binding("enter", "open_quick_jump", "Quick jump", show=False),
         Binding("o", "open_toggles", "Options"),
@@ -390,6 +391,9 @@ class IRViewerApp(App):
     def action_open_help(self) -> None:
         self.push_screen(HelpScreen(self._help_items()))
 
+    def action_open_report(self) -> None:
+        self.push_screen(ReportScreen(self._current_path))
+
     def _help_items(self) -> list[tuple[str, str]]:
         items: list[tuple[str, str]] = [
             ("j / ↑ / C-p", "Move up"),
@@ -411,6 +415,7 @@ class IRViewerApp(App):
             ("o", "Options"),
             ("i", "Toggle details panel"),
             ("z", "Zoom details panel"),
+            ("r", "Histogram report"),
             ("Enter", "Quick jump"),
             ("Space", "Select"),
             ("H", "Help"),
@@ -2522,6 +2527,84 @@ class HelpScreen(ModalScreen[None]):
             event.stop()
 
 
+class ReportScreen(ModalScreen[None]):
+    CSS = """
+    ReportScreen {
+        align: center middle;
+    }
+
+    #report-panel {
+        width: 90%;
+        height: 90%;
+        border: round $accent;
+        padding: 1 2;
+        background: $surface;
+    }
+
+    #report-log {
+        height: 1fr;
+    }
+
+    #report-filter {
+        margin: 0 0 1 0;
+    }
+
+    #report-table {
+        height: 1fr;
+    }
+    """
+
+    def __init__(self, path: Path) -> None:
+        super().__init__()
+        self.path = path
+        self._rows: list[tuple[str, dict[str, int]]] = []
+        self._total_instructions: int = 0
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="report-panel"):
+            yield Label("Instruction histogram report", id="report-summary")
+            yield Label("Type to fuzzy-filter by instruction name")
+            yield Input(placeholder="Filter instructions (fuzzy)", id="report-filter")
+            yield DataTable(id="report-table")
+            yield Label("Esc = close")
+
+    def on_mount(self) -> None:
+        self._total_instructions, self._rows = _instruction_histogram_data(self.path)
+        table = self.query_one("#report-table", DataTable)
+        table.clear(columns=True)
+        table.add_columns("Instruction", "onX", "onY", "others", "total")
+        table.cursor_type = "row"
+        table.fixed_rows = 0
+        self._refresh_table()
+        self.query_one("#report-filter", Input).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "report-filter":
+            self._refresh_table()
+
+    def _refresh_table(self) -> None:
+        table = self.query_one("#report-table", DataTable)
+        query = self.query_one("#report-filter", Input).value.strip()
+        table.fixed_rows = 0
+        table.clear(columns=False)
+        shown = 0
+        def fmt(value: int) -> str:
+            return "-" if value == 0 else str(value)
+        for name, row in self._rows:
+            if query and not _fuzzy_match(query, name):
+                continue
+            table.add_row(name, fmt(row["onX"]), fmt(row["onY"]), fmt(row["others"]), fmt(row["total"]))
+            shown += 1
+        self.query_one("#report-summary", Label).update(
+            f"Instruction histogram report — total: {self._total_instructions}, shown: {shown}, unique: {len(self._rows)}"
+        )
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            self.dismiss(None)
+            event.stop()
+
+
 
 
 def _collect_ws_funcs(lines: list[str]) -> list[tuple[str, int, int]]:
@@ -2846,10 +2929,68 @@ def _cursor_row(cursor_location) -> int:
     return 0
 
 
+def _instruction_histogram_data(path: Path) -> tuple[int, list[tuple[str, dict[str, int]]]]:
+    doc = Document.from_path(path)
+    view = DocumentView(doc)
+    view.render()
+
+    def _valid_inst_name(inst_name: str) -> bool:
+        name = inst_name.strip()
+        if "." not in name:
+            return False
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", name):
+            return False
+        return True
+
+    def _valid_op_name(op_name: str) -> bool:
+        return re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", op_name) is not None
+
+    counts: dict[str, dict[str, int]] = {}
+    included_count = 0
+    for source_index in sorted(view.instructions.keys()):
+        instruction = view.instructions[source_index]
+        if not _valid_inst_name(instruction.inst):
+            continue
+        op_value = _op_attr_value(instruction.attrs)
+        key = f"{instruction.inst}.{op_value}" if op_value and _valid_op_name(op_value) else instruction.inst
+        axis = _axis_from_attrs(instruction.attrs)
+        axis_key = "onX" if axis == "X" else "onY" if axis == "Y" else "others"
+        row = counts.setdefault(key, {"onX": 0, "onY": 0, "others": 0, "total": 0})
+        row[axis_key] += 1
+        row["total"] += 1
+        included_count += 1
+
+    ordered = sorted(counts.items(), key=lambda item: (-item[1]["total"], item[0]))
+    return included_count, ordered
+
+
+def _instruction_histogram_report(path: Path) -> str:
+    included_count, ordered = _instruction_histogram_data(path)
+    name_width = max([len("Instruction"), *(len(name) for name, _ in ordered)] or [11])
+    lines = [
+        f"Instruction histogram for {path}",
+        f"Total instructions: {included_count}",
+        f"Unique inst/op keys: {len(ordered)}",
+        "",
+        f"{'Instruction'.ljust(name_width)}  {'onX':>6}  {'onY':>6}  {'others':>8}  {'total':>6}",
+        f"{'-' * name_width}  {'-' * 6}  {'-' * 6}  {'-' * 8}  {'-' * 6}",
+    ]
+    for name, row in ordered:
+        lines.append(
+            f"{name.ljust(name_width)}  {row['onX']:6d}  {row['onY']:6d}  {row['others']:8d}  {row['total']:6d}"
+        )
+    return "\n".join(lines)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="IR Viewer")
     parser.add_argument("path", nargs="?", default=None, help="Path to IR file")
     parser.add_argument("--profile", action="store_true", help="Run in headless profile mode")
+    parser.add_argument(
+        "--histogram",
+        action="store_true",
+        help="Print instruction histogram (inst.<op>) by axis and exit",
+    )
     parser.add_argument("--show-alloc-free", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--show-full-prefix", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--show-line-numbers", action=argparse.BooleanOptionalAction, default=None)
@@ -2909,6 +3050,9 @@ def main() -> None:
         options.show_left_loc = parsed.show_left_loc
     if parsed.highlight_non_simple_srctgt is not None:
         options.highlight_non_simple_srctgt = parsed.highlight_non_simple_srctgt
+    if parsed.histogram:
+        print(_instruction_histogram_report(path))
+        return
     app = IRViewerApp(
         path,
         profile_mode=profile_mode,
@@ -2916,7 +3060,7 @@ def main() -> None:
         file_choices=file_choices,
         file_root=file_root,
     )
-    app.run(headless=profile_mode, mouse=False)
+    app.run(headless=profile_mode, mouse=True)
 
 
 def _looks_like_type(token: str) -> bool:
