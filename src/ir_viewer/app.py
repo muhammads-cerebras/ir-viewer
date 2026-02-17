@@ -1380,8 +1380,10 @@ class IRViewerApp(App):
 
     def _styled_entry_line(self, entry: LineEntry, selected_chain: set[str]) -> Text:
         line = entry.text.copy()
-        if entry.node.kind == "loc_group" and entry.group_prefix and entry.group_prefix in selected_chain:
-            line.stylize("on rgb(60,60,80)", 0, len(line))
+        if entry.node.kind == "loc_group":
+            if entry.group_prefix and entry.group_prefix in selected_chain:
+                line.stylize("on rgb(60,60,80)", 0, len(line))
+            return line
         if entry.node.source_index in self._highlight_level1:
             line.stylize("on rgb(100,170,100)", 0, len(line))
         elif entry.node.source_index in self._highlight_level2:
