@@ -1069,9 +1069,16 @@ class IRViewerApp(App):
                     if sem_idx != -1:
                         label_text.stylize("dodger_blue1", sem_idx, sem_idx + len(sem_text))
                 num_rx_value = _num_rx_value(instruction.attrs)
-                if not num_rx_value:
-                    op_value = _op_attr_value(instruction.attrs)
-                    inst_tail = instruction.inst.split(".")[-1]
+                op_value = _op_attr_value(instruction.attrs)
+                inst_tail = instruction.inst.split(".")[-1]
+                is_io_tx = (
+                    op_value
+                    and op_value.startswith("io")
+                    and inst_tail in {"tx", "txact", "request_txact", "master_tx"}
+                )
+                if is_io_tx:
+                    num_rx_value = None
+                elif not num_rx_value:
                     if (
                         op_value
                         and (op_value.startswith("slave") or op_value.startswith("switchroot"))
@@ -1089,6 +1096,7 @@ class IRViewerApp(App):
                         and not op_value.startswith("slave")
                         and not op_value.startswith("switchroot")
                         and not op_value.startswith("none")
+                        and not op_value.startswith("io")
                         and inst_tail in {
                         "tx",
                         "txact",
@@ -1128,11 +1136,18 @@ class IRViewerApp(App):
                         sem_count = _parse_semaphore_count(sem_value)
                         num_rx_value = _num_rx_value(instruction.attrs)
                         num_rx_count = _parse_semaphore_count(num_rx_value)
+                        op_value = _op_attr_value(instruction.attrs)
+                        inst_tail = instruction.inst.split(".")[-1]
+                        is_io_tx = (
+                            op_value
+                            and op_value.startswith("io")
+                            and inst_tail in {"tx", "txact", "request_txact", "master_tx"}
+                        )
+                        if is_io_tx:
+                            num_rx_count = 0
                         
                         # Check default num_rx for slave tx ops and non-slave, non-none tx ops
                         if not num_rx_count:
-                            op_value = _op_attr_value(instruction.attrs)
-                            inst_tail = instruction.inst.split(".")[-1]
                             if (
                                 op_value
                                 and (op_value.startswith("slave") or op_value.startswith("switchroot"))
@@ -1145,6 +1160,7 @@ class IRViewerApp(App):
                                 and not op_value.startswith("slave")
                                 and not op_value.startswith("switchroot")
                                 and not op_value.startswith("none")
+                                and not op_value.startswith("io")
                                 and inst_tail in {"tx", "txact", "request_txact", "master_tx"}
                             ):
                                 num_rx_count = 1

@@ -1599,7 +1599,9 @@ def _instruction_label(
     if semaphore_value:
         inst_name = f"{inst_name} → ({semaphore_value} tx)"
     num_rx_value = _num_rx_value(instruction.attrs)
-    if not num_rx_value:
+    if _is_io_tx_instruction(instruction.inst, instruction.attrs):
+        num_rx_value = None
+    elif not num_rx_value:
         op_value = _op_attr_value(instruction.attrs)
         inst_tail = instruction.inst.split(".")[-1]
         if (
@@ -2405,14 +2407,54 @@ def _is_tx_instruction(inst_name: str) -> bool:
     return name in {"tx", "txact", "request_txact", "master_tx", "slave_reconfig"}
 
 
+def _is_io_tx_instruction(inst_name: str, attrs: Optional[str]) -> bool:
+    name = inst_name.split(".")[-1]
+    if name not in {"tx", "txact", "request_txact", "master_tx"}:
+        return False
+    op_value = _op_attr_value(attrs)
+    return bool(op_value and op_value.startswith("io"))
+
+
+def _same_axis_op_prefix_match(producer_op: Optional[str], consumer_op: Optional[str]) -> bool:
+    if not producer_op or not consumer_op:
+        return True
+    return consumer_op.startswith(producer_op)
+
+
+def _consume_num_rx_from_queue(
+    queue: List[tuple[int, int]],
+    instructions: Dict[int, Instruction],
+    consumer_idx: int,
+    consumer_op: Optional[str],
+    require_prefix_match: bool,
+) -> bool:
+    for pos, (producer_idx, remaining) in enumerate(queue):
+        if require_prefix_match:
+            producer = instructions.get(producer_idx)
+            producer_op = _op_attr_value(producer.attrs) if producer else None
+            if not _same_axis_op_prefix_match(producer_op, consumer_op):
+                continue
+        object.__setattr__(instructions[consumer_idx], "num_rx_unblocker", producer_idx)
+        producer = instructions[producer_idx]
+        new_consumers = list(producer.num_rx_consumers) + [consumer_idx]
+        object.__setattr__(producer, "num_rx_consumers", new_consumers)
+        remaining -= 1
+        if remaining <= 0:
+            queue.pop(pos)
+        else:
+            queue[pos] = (producer_idx, remaining)
+        return True
+    return False
+
+
 def _is_rx_consumer(inst_name: str, attrs: Optional[str]) -> bool:
     name = inst_name.split(".")[-1]
     if name not in {"rx", "rxact", "request_rxact", "master_rx"}:
         return False
     op_value = _op_attr_value(attrs)
-    # rx is a consumer if it's slave/switchroot OR if it's non-slave, non-switchroot, non-none
+    # io/none rx ops do not consume data.
     if op_value:
-        return not op_value.startswith("none")
+        return not op_value.startswith("none") and not op_value.startswith("io")
     return False
 
 
@@ -2464,6 +2506,8 @@ def _compute_semaphore_relationships(instructions: Dict[int, Instruction]) -> No
         # Handle num_rx production
         num_rx_value = _num_rx_value(instruction.attrs)
         num_rx_count = _parse_semaphore_count(num_rx_value)
+        if _is_io_tx_instruction(instruction.inst, instruction.attrs):
+            num_rx_count = None
         is_slave_or_switchroot_tx = False
         is_other_tx = False
         
@@ -2475,6 +2519,7 @@ def _compute_semaphore_relationships(instructions: Dict[int, Instruction]) -> No
                 and (op_value.startswith("slave") or op_value.startswith("switchroot"))
                 and not op_value.startswith("slaveCacheStore")
                 and inst_tail in {"master_tx"}
+                and not op_value.startswith("io")
             ):
                 num_rx_count = 1
                 is_slave_or_switchroot_tx = True
@@ -2483,6 +2528,7 @@ def _compute_semaphore_relationships(instructions: Dict[int, Instruction]) -> No
                 and not op_value.startswith("slave")
                 and not op_value.startswith("switchroot")
                 and not op_value.startswith("none")
+                and not op_value.startswith("io")
                 and inst_tail in {"master_tx"}
             ):
                 num_rx_count = 1
@@ -2541,18 +2587,17 @@ def _compute_semaphore_relationships(instructions: Dict[int, Instruction]) -> No
                     queue = num_rx_queues_opposite[axis_key]
                     if not queue:
                         continue
-                    producer_idx, remaining = queue[0]
-                    # Update both producer and consumer
-                    object.__setattr__(instruction, 'num_rx_unblocker', producer_idx)
-                    producer = instructions[producer_idx]
-                    new_consumers = list(producer.num_rx_consumers) + [line_idx]
-                    object.__setattr__(producer, 'num_rx_consumers', new_consumers)
-                    remaining -= 1
-                    if remaining <= 0:
-                        queue.pop(0)
-                    else:
-                        queue[0] = (producer_idx, remaining)
-                    break
+                    require_prefix_match = bool(
+                        consumer_op and not consumer_op.startswith("slave")
+                    )
+                    if _consume_num_rx_from_queue(
+                        queue,
+                        instructions,
+                        line_idx,
+                        consumer_op,
+                        require_prefix_match=require_prefix_match,
+                    ):
+                        break
             else:
                 # Try same-axis queue
                 queue_axes: List[Optional[str]] = []
@@ -2565,16 +2610,12 @@ def _compute_semaphore_relationships(instructions: Dict[int, Instruction]) -> No
                     queue = num_rx_queues_same[axis_key]
                     if not queue:
                         continue
-                    producer_idx, remaining = queue[0]
-                    # Update both producer and consumer
-                    object.__setattr__(instruction, 'num_rx_unblocker', producer_idx)
-                    producer = instructions[producer_idx]
-                    new_consumers = list(producer.num_rx_consumers) + [line_idx]
-                    object.__setattr__(producer, 'num_rx_consumers', new_consumers)
-                    remaining -= 1
-                    if remaining <= 0:
-                        queue.pop(0)
-                    else:
-                        queue[0] = (producer_idx, remaining)
-                    break
+                    if _consume_num_rx_from_queue(
+                        queue,
+                        instructions,
+                        line_idx,
+                        consumer_op,
+                        require_prefix_match=True,
+                    ):
+                        break
 
