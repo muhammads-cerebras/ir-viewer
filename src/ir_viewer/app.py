@@ -102,18 +102,19 @@ class IRViewerApp(App):
 
     def __init__(
         self,
-        path: Path,
+        path: Path | None,
         profile_mode: bool = False,
         options: RenderOptions | None = None,
         file_choices: list[Path] | None = None,
         file_root: Path | None = None,
+        require_file_choice: bool = False,
     ) -> None:
         super().__init__()
         self.options = options or RenderOptions()
         self._file_choices = file_choices or []
         self._file_root = file_root
+        self._require_file_choice = require_file_choice
         self._current_path = path
-        self._load_path(path)
         self.profile_mode = profile_mode
         self.segment_index = 0
         self.selected_node = NodeData(kind="inst", source_index=0, attrs=None, value=None, layout_index=None)
@@ -123,9 +124,9 @@ class IRViewerApp(App):
         self._pending_highlight: NodeData | None = None
         self._highlight_timer = None
         self._jump_sections: list[tuple[str, int]] = []
-        self._ws_funcs: list[tuple[str, int, int]] = _collect_ws_funcs(self.document.lines)
+        self._ws_funcs: list[tuple[str, int, int]] = []
         self._active_func_index: int | None = None
-        self._container_by_line: dict[int, str | None] = _collect_host_container_by_line(self.document.lines)
+        self._container_by_line: dict[int, str | None] = {}
         self._def_container_by_line: dict[int, str | None] = {}
         self._highlight_level1: set[int] = set()
         self._highlight_level2: set[int] = set()
@@ -150,6 +151,10 @@ class IRViewerApp(App):
         self._split_focus_side: str = "left"
         self._zoom_details: bool = False
         self._zoom_prev_details_visible: bool = False
+        self._is_loaded: bool = False
+        if path is not None and not self._require_file_choice:
+            self._load_path(path)
+            self._is_loaded = True
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -169,11 +174,13 @@ class IRViewerApp(App):
         list_view.can_focus = True
         list_view.wrap = False if self.options.split_axis_view else self.options.wrap_left_panel
         self._last_list_width = list_view.size.width
-        if self._file_choices and len(self._file_choices) > 1 and not self.profile_mode:
+        if self._file_choices and self._require_file_choice and not self.profile_mode:
             self.push_screen(
                 FileSelectScreen(self._file_choices, self._file_root),
                 self._select_file,
             )
+            return
+        if not self._is_loaded:
             return
         self._post_load_setup()
         if self.profile_mode:
@@ -195,9 +202,13 @@ class IRViewerApp(App):
 
     def _select_file(self, selection: int | None) -> None:
         if selection is None:
+            if self._require_file_choice and not self._is_loaded:
+                self.exit()
             return
         path = self._file_choices[selection]
         self._load_path(path)
+        self._is_loaded = True
+        self._require_file_choice = False
         self._post_load_setup()
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
@@ -279,6 +290,8 @@ class IRViewerApp(App):
         self.call_after_refresh(self._render_list)
 
     def on_resize(self, event: events.Resize) -> None:
+        if not self._is_loaded:
+            return
         list_view = self.query_one("#list", RichLog)
         width = list_view.size.width
         if self._last_list_width != width:
@@ -756,6 +769,8 @@ class IRViewerApp(App):
         self.action_focus_details()
 
     def _render_list(self) -> None:
+        if not self._is_loaded or not hasattr(self, "view"):
+            return
         list_log = self.query_one("#list", RichLog)
         list_log.clear()
         self._jump_sections = []
@@ -3109,10 +3124,11 @@ def main() -> None:
     parsed = parser.parse_args()
 
     profile_mode = parsed.profile
-    path = Path(parsed.path) if parsed.path else _default_ir_path()
+    path: Path | None = Path(parsed.path) if parsed.path else _default_ir_path()
     file_choices: list[Path] = []
     file_root: Path | None = None
-    if path.exists() and path.is_dir():
+    require_file_choice = False
+    if path is not None and path.exists() and path.is_dir():
         file_root = path
         file_choices = sorted(path.glob("*.mlir"))
         if not file_choices:
@@ -3120,8 +3136,12 @@ def main() -> None:
                 f"No .mlir files found in directory: {path}\n"
                 f"Current working directory: {Path.cwd()}"
             )
-        path = file_choices[0]
-    if not path.exists():
+        if parsed.histogram:
+            path = file_choices[0]
+        else:
+            require_file_choice = True
+            path = None
+    if path is not None and not path.exists():
         raise SystemExit(_ir_not_found_message(path, parsed.path))
     options = RenderOptions()
     if parsed.show_alloc_free is not None:
@@ -3149,6 +3169,8 @@ def main() -> None:
     if parsed.highlight_non_simple_srctgt is not None:
         options.highlight_non_simple_srctgt = parsed.highlight_non_simple_srctgt
     if parsed.histogram:
+        if path is None:
+            raise SystemExit("Histogram mode requires an MLIR file path")
         print(_instruction_histogram_report(path))
         return
     app = IRViewerApp(
@@ -3157,6 +3179,7 @@ def main() -> None:
         options=options,
         file_choices=file_choices,
         file_root=file_root,
+        require_file_choice=require_file_choice,
     )
     app.run(headless=profile_mode, mouse=True)
 
