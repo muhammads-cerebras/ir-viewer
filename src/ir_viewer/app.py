@@ -2180,12 +2180,20 @@ class FileSelectScreen(ModalScreen[int]):
         align: center middle;
     }
 
-    #file-pick {
+    #file-panel {
         width: 80%;
         height: 80%;
         border: round $accent;
         padding: 1 2;
         background: $surface;
+    }
+
+    #file-filter {
+        margin: 0 0 1 0;
+    }
+
+    #file-table {
+        height: 1fr;
     }
     """
 
@@ -2194,9 +2202,8 @@ class FileSelectScreen(ModalScreen[int]):
         self.files = files
         self.root = root
         self._resolved_root = root.resolve() if root else None
-
-    def compose(self) -> ComposeResult:
-        items: list[ListItem] = []
+        self._entries: list[tuple[int, Path, str]] = []
+        self._filtered_entries: list[tuple[int, Path, str]] = []
         for idx, path in enumerate(self.files):
             resolved_path = path.resolve()
             label = str(resolved_path)
@@ -2205,17 +2212,72 @@ class FileSelectScreen(ModalScreen[int]):
                     label = str(resolved_path.relative_to(self._resolved_root))
                 except ValueError:
                     label = str(resolved_path)
-            item = ListItem(Label(label))
-            item._file_index = idx  # type: ignore[attr-defined]
-            items.append(item)
-        yield ListView(*items, id="file-pick")
+            self._entries.append((idx, path, label))
 
-    def on_list_view_selected(self, event: ListView.Selected) -> None:
-        item = event.item
-        index = getattr(item, "_file_index", None)
-        self.dismiss(index)
+    def compose(self) -> ComposeResult:
+        with Vertical(id="file-panel"):
+            yield Label("Select .mlir file")
+            yield Label("Type to fuzzy-filter by file path")
+            yield Input(placeholder="Filter files (fuzzy)", id="file-filter")
+            yield DataTable(id="file-table")
+            yield Label("Enter = open, Esc = cancel")
+            yield Label("", id="file-summary")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#file-table", DataTable)
+        table.clear(columns=True)
+        table.add_columns("MLIR file")
+        table.cursor_type = "row"
+        table.fixed_rows = 0
+        self._refresh_table()
+        self.query_one("#file-filter", Input).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "file-filter":
+            self._refresh_table()
+
+    def _refresh_table(self) -> None:
+        table = self.query_one("#file-table", DataTable)
+        query = self.query_one("#file-filter", Input).value.strip()
+        table.fixed_rows = 0
+        table.clear(columns=False)
+        self._filtered_entries = []
+        for entry in self._entries:
+            _, _, label = entry
+            if query and not _fuzzy_match(query, label):
+                continue
+            self._filtered_entries.append(entry)
+            table.add_row(label)
+        shown = len(self._filtered_entries)
+        total = len(self._entries)
+        self.query_one("#file-summary", Label).update(f"Shown: {shown}/{total}")
+
+    def _select_current_row(self) -> None:
+        if not self._filtered_entries:
+            return
+        table = self.query_one("#file-table", DataTable)
+        row = _cursor_row(table.cursor_coordinate)
+        if row < 0 or row >= len(self._filtered_entries):
+            return
+        original_index = self._filtered_entries[row][0]
+        self.dismiss(original_index)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        row = event.cursor_row
+        if row < 0 or row >= len(self._filtered_entries):
+            return
+        original_index = self._filtered_entries[row][0]
+        self.dismiss(original_index)
 
     def on_key(self, event: events.Key) -> None:
+        if event.key == "enter":
+            self._select_current_row()
+            event.stop()
+            return
+        if event.key == "escape":
+            self.dismiss(None)
+            event.stop()
+            return
         if event.key == "q":
             self.app.exit()
             event.stop()
