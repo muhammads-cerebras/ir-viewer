@@ -1064,6 +1064,9 @@ class IRViewerApp(App):
                 if type_sep != -1:
                     label_text.stylize("magenta", type_sep + 3, len(label_string))
                 for match in re.finditer(r"(?<!\S)([^\s]+)\s+%[A-Za-z0-9_$.]+", label_string):
+                    token = match.group(1)
+                    if not _looks_like_type(token):
+                        continue
                     type_start = match.start(1)
                     type_end = match.end(1)
                     label_text.stylize("magenta", type_start, type_end)
@@ -1307,9 +1310,7 @@ class IRViewerApp(App):
         for entry in self._flat_entries:
             if entry.node.source_index is None:
                 continue
-            container_id = self._container_by_line.get(entry.node.source_index)
-            if container_id is None:
-                continue
+            container_id = self._loc_container_id_for_line(entry.node.source_index)
             loc_name = self._loc_name_for_line(entry.node.source_index)
             if not loc_name:
                 continue
@@ -1327,12 +1328,7 @@ class IRViewerApp(App):
                 entry.loc_group_suffix = None
                 entry.loc_prefix_base = None
                 continue
-            container_id = self._container_by_line.get(entry.node.source_index)
-            if container_id is None:
-                entry.loc_suffix = None
-                entry.loc_group_suffix = None
-                entry.loc_prefix_base = None
-                continue
+            container_id = self._loc_container_id_for_line(entry.node.source_index)
             loc_name = loc_by_line.get(entry.node.source_index)
             if not loc_name:
                 entry.loc_suffix = None
@@ -1348,20 +1344,60 @@ class IRViewerApp(App):
             entry.loc_group_suffix = suffix
             entry.loc_prefix_base = prefix
 
+    def _loc_container_id_for_line(self, line_idx: int) -> str:
+        container_id = self._container_by_line.get(line_idx)
+        if container_id is not None:
+            return container_id
+        for func_label, start, end in self._ws_funcs:
+            if start <= line_idx <= end:
+                return f"func:{func_label}"
+        return "__global__"
+
     def _loc_name_for_line(self, line_idx: int) -> str | None:
+        def _extract_from_text(text: str) -> str | None:
+            inline_loc_match = re.search(r"loc\(\"([^\"]+)\"\)", text)
+            if inline_loc_match:
+                full = inline_loc_match.group(1)
+                first = full.split(",", 1)[0].strip()
+                return first or None
+            match = _LOC_REF_RE.search(text)
+            if not match:
+                return None
+            loc_def = self.document.locs.get(match.group(1))
+            if not loc_def:
+                return None
+            loc_match = re.search(r"loc\(\"([^\"]+)\"\)", loc_def.text)
+            if not loc_match:
+                return None
+            full = loc_match.group(1)
+            first = full.split(",", 1)[0].strip()
+            return first or None
+
+        instruction = self.view.instructions.get(line_idx)
+        if instruction and instruction.loc_ref:
+            loc_def = self.document.locs.get(instruction.loc_ref)
+            if loc_def:
+                found = _extract_from_text(loc_def.text)
+                if found:
+                    return found
+
         line = self.document.lines[line_idx]
-        match = _LOC_REF_RE.search(line)
-        if not match:
-            return None
-        loc_def = self.document.locs.get(match.group(1))
-        if not loc_def:
-            return None
-        loc_match = re.search(r"loc\(\"([^\"]+)\"\)", loc_def.text)
-        if not loc_match:
-            return None
-        full = loc_match.group(1)
-        first = full.split(",", 1)[0].strip()
-        return first or None
+        found = _extract_from_text(line)
+        if found:
+            return found
+
+        # SSA ops may place loc(...) on a following continuation line.
+        for look_ahead in range(1, 21):
+            idx = line_idx + look_ahead
+            if idx >= len(self.document.lines):
+                break
+            next_line = self.document.lines[idx].strip()
+            if not next_line:
+                continue
+            found = _extract_from_text(next_line)
+            if found:
+                return found
+        return None
 
     def _loc_suffix_matches_inst(self, line_idx: int, loc_suffix: str) -> bool:
         inst_name = self._display_inst_name(line_idx)
@@ -3067,6 +3103,10 @@ def _looks_like_type(token: str) -> bool:
     if "<" in token or ">" in token or "!" in token:
         return True
     if re.match(r"^(ui|i|f|bf)\d+$", token):
+        return True
+    if re.match(r"^(?:\d+x)+(?:ui|i|f|bf)\d+$", token):
+        return True
+    if re.match(r"^(?:\?x)+(?:ui|i|f|bf)\d+$", token):
         return True
     if token in {"index"}:
         return True
