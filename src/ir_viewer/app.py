@@ -67,7 +67,7 @@ class IRViewerApp(App):
         Binding("q", "quit", "Quit"),
         Binding("i", "toggle_details", "More info"),
         Binding("z", "toggle_zoom", "Zoom details"),
-        Binding("r", "open_report", "Histogram report"),
+        Binding("r", "open_report", "Instruction Count"),
         Binding("f", "open_jump", "Switch function"),
         Binding("enter", "open_quick_jump", "Quick jump", show=False),
         Binding("o", "open_toggles", "Options"),
@@ -428,7 +428,7 @@ class IRViewerApp(App):
             ("o", "Options"),
             ("i", "Toggle details panel"),
             ("z", "Zoom details panel"),
-            ("r", "Histogram report"),
+            ("r", "Instruction count"),
             ("Enter", "Quick jump"),
             ("Space", "Select"),
             ("H", "Help"),
@@ -2675,14 +2675,14 @@ class ReportScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="report-panel"):
-            yield Label("Instruction histogram report", id="report-summary")
+            yield Label("Instruction count report", id="report-summary")
             yield Label("Type to fuzzy-filter by instruction name")
             yield Input(placeholder="Filter instructions (fuzzy)", id="report-filter")
             yield DataTable(id="report-table")
             yield Label("Esc = close")
 
     def on_mount(self) -> None:
-        self._total_instructions, self._rows = _instruction_histogram_data(self.path)
+        self._total_instructions, self._rows = _instruction_count_data(self.path)
         table = self.query_one("#report-table", DataTable)
         table.clear(columns=True)
         table.add_columns("Instruction", "onX", "onY", "others", "total")
@@ -2709,7 +2709,7 @@ class ReportScreen(ModalScreen[None]):
             table.add_row(name, fmt(row["onX"]), fmt(row["onY"]), fmt(row["others"]), fmt(row["total"]))
             shown += 1
         self.query_one("#report-summary", Label).update(
-            f"Instruction histogram report — total: {self._total_instructions}, shown: {shown}, unique: {len(self._rows)}"
+            f"Instruction count report — total: {self._total_instructions}, shown: {shown}, unique: {len(self._rows)}"
         )
 
     def on_key(self, event: events.Key) -> None:
@@ -3042,7 +3042,7 @@ def _cursor_row(cursor_location) -> int:
     return 0
 
 
-def _instruction_histogram_data(path: Path) -> tuple[int, list[tuple[str, dict[str, int]]]]:
+def _instruction_count_data(path: Path) -> tuple[int, list[tuple[str, dict[str, int]]]]:
     doc = Document.from_path(path)
     view = DocumentView(doc)
     view.render()
@@ -3077,11 +3077,11 @@ def _instruction_histogram_data(path: Path) -> tuple[int, list[tuple[str, dict[s
     return included_count, ordered
 
 
-def _instruction_histogram_report(path: Path) -> str:
-    included_count, ordered = _instruction_histogram_data(path)
+def _instruction_count_report(path: Path) -> str:
+    included_count, ordered = _instruction_count_data(path)
     name_width = max([len("Instruction"), *(len(name) for name, _ in ordered)] or [11])
     lines = [
-        f"Instruction histogram for {path}",
+        f"Instruction count report for {path}",
         f"Total instructions: {included_count}",
         f"Unique inst/op keys: {len(ordered)}",
         "",
@@ -3100,9 +3100,9 @@ def main() -> None:
     parser.add_argument("path", nargs="?", default=None, help="Path to IR file")
     parser.add_argument("--profile", action="store_true", help="Run in headless profile mode")
     parser.add_argument(
-        "--histogram",
+        "--instruction_count",
         action="store_true",
-        help="Print instruction histogram (inst.<op>) by axis and exit",
+        help="Print instruction count report (inst.<op>) by axis and exit",
     )
     parser.add_argument("--show-alloc-free", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--show-full-prefix", action=argparse.BooleanOptionalAction, default=None)
@@ -3136,7 +3136,7 @@ def main() -> None:
                 f"No .mlir files found in directory: {path}\n"
                 f"Current working directory: {Path.cwd()}"
             )
-        if parsed.histogram:
+        if parsed.instruction_count:
             path = file_choices[0]
         else:
             require_file_choice = True
@@ -3168,10 +3168,10 @@ def main() -> None:
         options.show_left_loc = parsed.show_left_loc
     if parsed.highlight_non_simple_srctgt is not None:
         options.highlight_non_simple_srctgt = parsed.highlight_non_simple_srctgt
-    if parsed.histogram:
+    if parsed.instruction_count:
         if path is None:
-            raise SystemExit("Histogram mode requires an MLIR file path")
-        print(_instruction_histogram_report(path))
+            raise SystemExit("Instruction count mode requires an MLIR file path")
+        print(_instruction_count_report(path))
         return
     app = IRViewerApp(
         path,

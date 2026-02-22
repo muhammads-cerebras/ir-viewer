@@ -128,7 +128,7 @@ class RenderOptions:
     show_left_types: bool = True
     align_left_panel: bool = False
     show_left_loc: bool = True
-    wrap_left_panel: bool = True
+    wrap_left_panel: bool = False
     emacs_mode: bool = False
     group_loc_prefixes: bool = False
     show_only_tx_rx: bool = False
