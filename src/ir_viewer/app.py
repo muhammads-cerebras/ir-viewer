@@ -1852,22 +1852,23 @@ class IRViewerApp(App):
                 continue
             for attrs_source in attr_sources:
                 attrs = _parse_attrs_flat(attrs_source)
-                matched_key = None
-                for key in attrs.keys():
-                    if _fuzzy_match(needle, key):
-                        matched_key = key
-                        break
-                if not matched_key:
+                exact_key = needle if needle in attrs else None
+                if exact_key is not None:
+                    candidate_keys = [exact_key]
+                else:
+                    candidate_keys = [key for key in attrs.keys() if _fuzzy_match(needle, key)]
+                if not candidate_keys:
                     continue
-                attr_value = attrs.get(matched_key)
-                if value_needle:
-                    if attr_value is None:
-                        continue
-                    if not _fuzzy_match(value_needle, attr_value):
-                        continue
-                self._ensure_details_visible()
-                self._set_selected_index(idx)
-                return
+                for matched_key in candidate_keys:
+                    attr_value = attrs.get(matched_key)
+                    if value_needle:
+                        if attr_value is None:
+                            continue
+                        if attr_value.strip() != value_needle:
+                            continue
+                    self._ensure_details_visible()
+                    self._set_selected_index(idx)
+                    return
 
 
     def _prepare_details_matches(self, query: str) -> None:
@@ -2522,7 +2523,7 @@ class AttrSearchScreen(ModalScreen[dict[str, str | None] | None]):
             attr_input = Input(placeholder="Attribute name (fuzzy, e.g. sq, atrn)", id="attr_input")
             yield attr_input
             yield AutoComplete(target=attr_input, candidates=self._dropdown_items)
-            yield Input(placeholder="Optional value (fuzzy)", id="attr_value")
+            yield Input(placeholder="Optional value (exact)", id="attr_value")
             yield Label("Enter = search, Esc = cancel")
 
     def on_mount(self) -> None:
