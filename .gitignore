@@ -1,0 +1,10 @@
+# Local Python/uv environments
+.venv/
+.uv/
+
+# Local micromamba bootstrap/runtime
+.micromamba/
+.micromamba-bin/
+
+# Optional local runtime artifacts
+.runtime/
