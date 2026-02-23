@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 import argparse
 import re
@@ -41,6 +42,10 @@ _ALLOC_SUFFIX_RE = re.compile(r"%[A-Za-z0-9_$.]+\.[A-Za-z0-9_.-]+")
 _SIZE_RE = re.compile(r"\(\d+\)")
 _SOURCE_VARS_RE = re.compile(r"⟨[^⟩]*⟩")
 _LOC_REF_RE = re.compile(r"loc\((#loc\d+)\)")
+_TENSOR_DUMP_FILE_RE = re.compile(
+    r"^rt_dump_wse_kernel(?P<kernel>\d+)_operand(?P<operand>\d+)_iter(?P<iteration>\d+)_box(?P<box>\d+)\.npy$"
+)
+_KERNEL_ATTR_RE = re.compile(r"\bkernel_id\s*=\s*(-?\d+)")
 
 
 class IRViewerApp(App):
@@ -74,6 +79,7 @@ class IRViewerApp(App):
         Binding("w", "toggle_left_wrap", "Switch wrap"),
         Binding("/", "open_search", "Search"),
         Binding("?", "open_attr_search", "Attr search"),
+        Binding("v", "open_tensor_dump", "Tensor dump"),
         Binding("H", "open_help", "Help"),
         Binding("n", "search_next", "Next match", show=False),
         Binding("N", "search_prev", "Prev match", show=False),
@@ -108,6 +114,7 @@ class IRViewerApp(App):
         file_choices: list[Path] | None = None,
         file_root: Path | None = None,
         require_file_choice: bool = False,
+        tensor_dump_path: Path | None = None,
     ) -> None:
         super().__init__()
         self.options = options or RenderOptions()
@@ -152,6 +159,11 @@ class IRViewerApp(App):
         self._zoom_details: bool = False
         self._zoom_prev_details_visible: bool = False
         self._is_loaded: bool = False
+        self._tensor_dump_path: Path | None = tensor_dump_path
+        self._tensor_dump_index: dict[int, dict[tuple[int, int, int], Path]] = self._build_tensor_dump_index(
+            tensor_dump_path
+        )
+        self._tensor_dump_by_line: dict[int, TensorDumpSelection] = {}
         if path is not None and not self._require_file_choice:
             self._load_path(path)
             self._is_loaded = True
@@ -374,6 +386,19 @@ class IRViewerApp(App):
     def action_open_attr_search(self) -> None:
         self.push_screen(AttrSearchScreen(self._collect_attr_options()), self._apply_attr_search)
 
+    def action_open_tensor_dump(self) -> None:
+        if not self._flat_entries:
+            return
+        entry = self._flat_entries[self._selected_index]
+        if entry.node.kind != "inst" or entry.node.source_index is None:
+            return
+        selection = self._tensor_dump_by_line.get(entry.node.source_index)
+        if selection is None:
+            return
+        self.push_screen(
+            TensorDumpScreen(entry.node.source_index, selection.kernel_id, selection.files_by_key)
+        )
+
     def _collect_attr_options(self) -> list[tuple[str, str | None]]:
         names: set[str] = set()
         values_by_key: dict[str, set[str]] = {}
@@ -424,6 +449,7 @@ class IRViewerApp(App):
             ("n / C-s", "Next match"),
             ("N / C-r", "Prev match"),
             ("?", "Attribute search"),
+            ("v", "Tensor dump (selected instruction)"),
             ("f", "Jump section"),
             ("o", "Options"),
             ("i", "Toggle details panel"),
@@ -815,7 +841,8 @@ class IRViewerApp(App):
                 prefix = self._line_number_prefix(entry.node)
                 group_marker = "│ " if entry.group_bar else ""
                 indent = self._indent_prefix(entry.depth + entry.group_level)
-                label_string = f"{prefix}{group_marker}{indent}{entry.raw_label}"
+                tensor_marker = self._tensor_marker_for_entry(entry)
+                label_string = f"{prefix}{group_marker}{indent}{tensor_marker}{entry.raw_label}"
                 if entry.loc_suffix:
                     label_string = f"{label_string} ‹{entry.loc_suffix}›"
                 entry.text = self._styled_label_text(entry.node.kind, entry.node.source_index, label_string)
@@ -1133,8 +1160,16 @@ class IRViewerApp(App):
                     rx_idx = label_string.find(rx_text)
                     if rx_idx != -1:
                         label_text.stylize("yellow", rx_idx, rx_idx + len(rx_text))
+                marker_idx = label_string.find("▶ ")
+                if marker_idx != -1:
+                    label_text.stylize("bold spring_green3", marker_idx, marker_idx + 1)
                 self._label_cache[(source_index, label_string)] = label_text
         return label_text
+
+    def _tensor_marker_for_entry(self, entry: "LineEntry") -> str:
+        if entry.node.kind != "inst" or entry.node.source_index is None:
+            return ""
+        return "▶ " if entry.node.source_index in self._tensor_dump_by_line else ""
 
     def _indent_prefix(self, depth: int) -> str:
         if depth <= 0:
@@ -1231,11 +1266,19 @@ class IRViewerApp(App):
                 prefix = self._line_number_prefix(entry.node)
                 group_marker = "│ " if entry.group_bar else ""
                 indent = self._indent_prefix(entry.depth + entry.group_level)
+                tensor_marker = self._tensor_marker_for_entry(entry)
                 if not parts:
-                    label_string = f"{prefix}{group_marker}{indent}{entry.raw_label}"
+                    label_string = f"{prefix}{group_marker}{indent}{tensor_marker}{entry.raw_label}"
                     entry.text = self._styled_label_text(entry.node.kind, entry.node.source_index, label_string)
                     continue
-                label_string = self._aligned_label_string(parts, widths, f"{prefix}{group_marker}", indent, entry.loc_suffix)
+                label_string = self._aligned_label_string(
+                    parts,
+                    widths,
+                    f"{prefix}{group_marker}",
+                    indent,
+                    entry.loc_suffix,
+                    tensor_marker=tensor_marker,
+                )
                 entry.text = self._styled_label_text(entry.node.kind, entry.node.source_index, label_string)
 
     def _split_instruction_columns(self, label: str) -> dict[str, str] | None:
@@ -1289,6 +1332,7 @@ class IRViewerApp(App):
         prefix: str,
         indent: str,
         loc_suffix: str | None,
+        tensor_marker: str = "",
     ) -> str:
         columns = [
             parts["handle"].ljust(widths["handle"]),
@@ -1309,7 +1353,7 @@ class IRViewerApp(App):
                 base = f"{base} ‹{loc_suffix}›"
             else:
                 base = f"‹{loc_suffix}›"
-        return f"{prefix}{indent}{base}"
+        return f"{prefix}{indent}{tensor_marker}{base}"
 
     def _apply_loc_suffixes(self) -> None:
         if not self._flat_entries:
@@ -1761,6 +1805,7 @@ class IRViewerApp(App):
         self._details_matches = []
         self._details_match_pos = -1
         self.selected_node = NodeData(kind="inst", source_index=0, attrs=None, value=None, layout_index=None)
+        self._tensor_dump_by_line = self._map_tensor_dumps_to_instructions()
 
     def _apply_toggles(self, values: dict[str, bool] | None) -> None:
         if values is None:
@@ -1868,6 +1913,68 @@ class IRViewerApp(App):
                     self._ensure_details_visible()
                     self._set_selected_index(idx)
                     return
+
+    @staticmethod
+    def _build_tensor_dump_index(
+        tensor_dump_path: Path | None,
+    ) -> dict[int, dict[tuple[int, int, int], Path]]:
+        if tensor_dump_path is None:
+            return {}
+        root = tensor_dump_path.expanduser()
+        if not root.exists() or not root.is_dir():
+            return {}
+        by_kernel: dict[int, dict[tuple[int, int, int], Path]] = {}
+        for candidate in root.rglob("*.npy"):
+            match = _TENSOR_DUMP_FILE_RE.match(candidate.name)
+            if not match:
+                continue
+            kernel = int(match.group("kernel"))
+            operand = int(match.group("operand"))
+            iteration = int(match.group("iteration"))
+            box = int(match.group("box"))
+            key = (operand, iteration, box)
+            by_kernel.setdefault(kernel, {})[key] = candidate
+        return by_kernel
+
+    def _map_tensor_dumps_to_instructions(self) -> dict[int, "TensorDumpSelection"]:
+        if not self._tensor_dump_index:
+            return {}
+        if not self.view.instructions:
+            self.view.render()
+        mapping: dict[int, TensorDumpSelection] = {}
+        for source_index in sorted(self.view.instructions.keys()):
+            instruction = self.view.instructions[source_index]
+            kernel_ids = self._instruction_kernel_ids(source_index, instruction.attrs)
+            for kernel_id in kernel_ids:
+                files_by_key = self._tensor_dump_index.get(kernel_id)
+                if not files_by_key:
+                    continue
+                mapping[source_index] = TensorDumpSelection(kernel_id=kernel_id, files_by_key=files_by_key)
+                break
+        return mapping
+
+    def _instruction_kernel_ids(self, source_index: int, attrs: str | None) -> list[int]:
+        values: list[int] = []
+        seen: set[int] = set()
+
+        def _append(value: int | None) -> None:
+            if value is None or value in seen:
+                return
+            seen.add(value)
+            values.append(value)
+
+        parsed = _parse_attrs_flat(attrs) if attrs else {}
+        raw_kernel_id = parsed.get("kernel_id")
+        if raw_kernel_id is not None:
+            _append(_parse_int_literal(raw_kernel_id))
+
+        # Fallback: parse raw source line as a safety net for unusual attr formatting.
+        if 0 <= source_index < len(self.document.lines):
+            line = self.document.lines[source_index]
+            for match in _KERNEL_ATTR_RE.finditer(line):
+                _append(_parse_int_literal(match.group(1)))
+
+        return values
 
 
     def _prepare_details_matches(self, query: str) -> None:
@@ -2149,6 +2256,113 @@ class LineEntry:
         self.group_level = group_level
         self.group_prefix = group_prefix
         self.group_chain = group_chain or []
+
+
+@dataclass(frozen=True)
+class TensorDumpSelection:
+    kernel_id: int
+    files_by_key: dict[tuple[int, int, int], Path]
+
+
+class TensorDumpScreen(ModalScreen[None]):
+    CSS = """
+    TensorDumpScreen {
+        align: center middle;
+    }
+
+    #tensor-panel {
+        width: 90%;
+        height: 90%;
+        border: round $accent;
+        padding: 1 2;
+        background: $surface;
+    }
+
+    #tensor-table {
+        height: 40%;
+        margin: 0 0 1 0;
+    }
+
+    #tensor-preview {
+        height: 1fr;
+    }
+    """
+
+    def __init__(self, source_index: int, kernel_id: int, files_by_key: dict[tuple[int, int, int], Path]) -> None:
+        super().__init__()
+        self.source_index = source_index
+        self.kernel_id = kernel_id
+        self._rows: list[tuple[int, int, int, Path]] = [
+            (operand, iteration, box, path)
+            for (operand, iteration, box), path in sorted(files_by_key.items())
+        ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="tensor-panel"):
+            yield Label(f"Tensor dump: line {self.source_index + 1}, kernel {self.kernel_id}")
+            yield Label("Choose operand / iter / box")
+            yield DataTable(id="tensor-table")
+            yield RichLog(id="tensor-preview", wrap=True)
+            yield Label("↑/↓ to choose; Enter to reload preview; Esc to close")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#tensor-table", DataTable)
+        table.clear(columns=True)
+        table.add_columns("operand", "iter", "box", "file")
+        table.cursor_type = "row"
+        table.fixed_rows = 0
+        for operand, iteration, box, path in self._rows:
+            table.add_row(str(operand), str(iteration), str(box), path.name)
+        if self._rows:
+            self._show_row(0)
+
+    def _show_row(self, row_index: int) -> None:
+        if row_index < 0 or row_index >= len(self._rows):
+            return
+        operand, iteration, box, path = self._rows[row_index]
+        preview = self.query_one("#tensor-preview", RichLog)
+        preview.clear()
+        preview.write(f"operand={operand}, iter={iteration}, box={box}")
+        preview.write(f"file: {path}")
+        try:
+            import numpy as np
+        except Exception:
+            preview.write("\nNumPy is not available in the current runtime. Re-run the app using ./ir-viewer so it uses the managed micromamba environment.")
+            return
+        try:
+            array = np.load(path, allow_pickle=False)
+        except Exception as exc:
+            preview.write(f"\nFailed to load tensor file: {exc}")
+            return
+        preview.write(f"\nshape: {array.shape}")
+        preview.write(f"dtype: {array.dtype}")
+        if array.size > 0 and np.issubdtype(array.dtype, np.number):
+            try:
+                preview.write(f"min/max: {array.min()} / {array.max()}")
+            except Exception:
+                pass
+        array_text = np.array2string(array, threshold=400, edgeitems=4, max_line_width=140)
+        if len(array_text) > 20000:
+            array_text = f"{array_text[:20000]}\n... <truncated>"
+        preview.write("")
+        preview.write(array_text)
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        self._show_row(event.cursor_row)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        self._show_row(event.cursor_row)
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "enter":
+            table = self.query_one("#tensor-table", DataTable)
+            self._show_row(_cursor_row(table.cursor_coordinate))
+            event.stop()
+            return
+        if event.key == "escape":
+            if self.app.screen is self:
+                self.dismiss(None)
+            event.stop()
 
 
 class FuncSelectScreen(ModalScreen[int]):
@@ -2844,6 +3058,17 @@ def _parse_semaphore_count(value: str | None) -> int | None:
     return None
 
 
+def _parse_int_literal(value: str | None) -> int | None:
+    if value is None:
+        return None
+    text = _strip_type_annotations(value).strip()
+    if not text:
+        return None
+    if re.fullmatch(r"-?\d+", text):
+        return int(text)
+    return None
+
+
 def _strip_group_prefix(loc_suffix: str | None, prefix: str) -> str | None:
     if not loc_suffix:
         return None
@@ -3121,6 +3346,11 @@ def main() -> None:
         default=None,
         help="Highlight layout SrcTgts lines where source and target sizes differ",
     )
+    parser.add_argument(
+        "--tensor-dump",
+        default=None,
+        help="Directory containing simulator tensor dumps (*.npy)",
+    )
     parsed = parser.parse_args()
 
     profile_mode = parsed.profile
@@ -3143,6 +3373,14 @@ def main() -> None:
             path = None
     if path is not None and not path.exists():
         raise SystemExit(_ir_not_found_message(path, parsed.path))
+    tensor_dump_path: Path | None = None
+    if parsed.tensor_dump:
+        tensor_dump_path = Path(parsed.tensor_dump)
+        if not tensor_dump_path.exists() or not tensor_dump_path.is_dir():
+            raise SystemExit(
+                f"Tensor dump path is not a directory: {tensor_dump_path}\n"
+                f"Current working directory: {Path.cwd()}"
+            )
     options = RenderOptions()
     if parsed.show_alloc_free is not None:
         options.show_alloc_free = parsed.show_alloc_free
@@ -3180,6 +3418,7 @@ def main() -> None:
         file_choices=file_choices,
         file_root=file_root,
         require_file_choice=require_file_choice,
+        tensor_dump_path=tensor_dump_path,
     )
     app.run(headless=profile_mode, mouse=True)
 

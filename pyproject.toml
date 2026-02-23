@@ -9,6 +9,11 @@ dependencies = [
   "textual-autocomplete>=4.0.0",
 ]
 
+[project.optional-dependencies]
+tensor-dump = [
+  "numpy>=1.26.0",
+]
+
 [project.scripts]
 ir-viewer = "ir_viewer.app:main"
 

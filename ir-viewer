@@ -4,17 +4,85 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CALL_DIR="$(pwd)"
 
-UV_BIN="$ROOT_DIR/.uv/uv"
-if [[ ! -x "$UV_BIN" ]]; then
-  echo "Installing uv ..."
-  mkdir -p "$ROOT_DIR/.uv"
-  curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR="$ROOT_DIR/.uv" sh
-fi
-export PATH="$ROOT_DIR/.uv:$PATH"
+MICROMAMBA_BIN_DIR="${IR_VIEWER_MICROMAMBA_BIN_DIR:-$ROOT_DIR/.micromamba-bin}"
+MICROMAMBA_BIN="${IR_VIEWER_MICROMAMBA_BIN:-$MICROMAMBA_BIN_DIR/micromamba}"
+MAMBA_ROOT_PREFIX="${MAMBA_ROOT_PREFIX:-$ROOT_DIR/.micromamba}"
+MAMBA_ENV_PATH="${IR_VIEWER_MAMBA_ENV_PATH:-$MAMBA_ROOT_PREFIX/envs/ir-viewer}"
+ENV_STAMP="$MAMBA_ENV_PATH/.ir_viewer_install_stamp"
 
-if [[ ! -d "$ROOT_DIR/.venv" ]]; then
-  echo "Setting up environment (uv sync)..."
-  "$UV_BIN" sync --project "$ROOT_DIR"
+ensure_local_micromamba() {
+  if [[ -x "$MICROMAMBA_BIN" ]]; then
+    return 0
+  fi
+
+  local os arch platform url tmp_archive
+  os="$(uname -s)"
+  arch="$(uname -m)"
+
+  case "$os" in
+    Linux)
+      case "$arch" in
+        x86_64|amd64) platform="linux-64" ;;
+        aarch64|arm64) platform="linux-aarch64" ;;
+        *)
+          echo "error: unsupported Linux architecture: $arch" >&2
+          exit 1
+          ;;
+      esac
+      ;;
+    Darwin)
+      case "$arch" in
+        x86_64) platform="osx-64" ;;
+        arm64) platform="osx-arm64" ;;
+        *)
+          echo "error: unsupported macOS architecture: $arch" >&2
+          exit 1
+          ;;
+      esac
+      ;;
+    *)
+      echo "error: unsupported OS for auto micromamba bootstrap: $os" >&2
+      exit 1
+      ;;
+  esac
+
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "error: curl is required to download micromamba" >&2
+    exit 1
+  fi
+
+  echo "Bootstrapping local micromamba ($platform) ..."
+  mkdir -p "$MICROMAMBA_BIN_DIR"
+  tmp_archive="$(mktemp)"
+  url="https://micro.mamba.pm/api/micromamba/${platform}/latest"
+
+  curl -LsSf "$url" -o "$tmp_archive"
+  tar -xjf "$tmp_archive" -C "$MICROMAMBA_BIN_DIR" --strip-components=1 bin/micromamba
+  rm -f "$tmp_archive"
+  chmod +x "$MICROMAMBA_BIN"
+}
+
+ensure_local_micromamba
+
+if [[ ! -x "$MICROMAMBA_BIN" ]]; then
+  echo "error: failed to bootstrap local micromamba" >&2
+  exit 1
+fi
+
+if [[ ! -x "$MAMBA_ENV_PATH/bin/python" ]]; then
+  echo "Creating micromamba env at: $MAMBA_ENV_PATH"
+  MAMBA_ROOT_PREFIX="$MAMBA_ROOT_PREFIX" "$MICROMAMBA_BIN" create -y -p "$MAMBA_ENV_PATH" -c conda-forge \
+    python=3.11 \
+    numpy \
+    uv \
+    pip
+fi
+
+if [[ ! -f "$ENV_STAMP" || "$ROOT_DIR/pyproject.toml" -nt "$ENV_STAMP" || "$ROOT_DIR/uv.lock" -nt "$ENV_STAMP" ]]; then
+  echo "Installing project into micromamba env..."
+  MAMBA_ROOT_PREFIX="$MAMBA_ROOT_PREFIX" "$MICROMAMBA_BIN" run -p "$MAMBA_ENV_PATH" \
+    uv pip install --python "$MAMBA_ENV_PATH/bin/python" --editable "$ROOT_DIR[tensor-dump]"
+  touch "$ENV_STAMP"
 fi
 
 IR_PATH=""
@@ -29,4 +97,5 @@ else
   IR_PATH="$CALL_DIR/ir.mlir"
 fi
 
-"$UV_BIN" run --project "$ROOT_DIR" ir-viewer "$IR_PATH" "$@"
+MAMBA_ROOT_PREFIX="$MAMBA_ROOT_PREFIX" "$MICROMAMBA_BIN" run -p "$MAMBA_ENV_PATH" \
+  ir-viewer "$IR_PATH" "$@"
