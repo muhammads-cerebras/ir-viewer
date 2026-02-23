@@ -45,7 +45,14 @@ _LOC_REF_RE = re.compile(r"loc\((#loc\d+)\)")
 _TENSOR_DUMP_FILE_RE = re.compile(
     r"^rt_dump_wse_kernel(?P<kernel>\d+)_operand(?P<operand>\d+)_iter(?P<iteration>\d+)_box(?P<box>\d+)\.npy$"
 )
+_ACT_HOST_INPUT_DUMP_FILE_RE = re.compile(
+    r"^act_host_input_(?P<id>\d+)_iter(?P<iteration>\d+)_box(?P<box>\d+)\.npy$"
+)
+_ACT_HOST_OUTPUT_DUMP_FILE_RE = re.compile(
+    r"^act_host_output_(?P<id>\d+)_iter(?P<iteration>\d+)_box(?P<box>\d+)\.npy$"
+)
 _KERNEL_ATTR_RE = re.compile(r"\bkernel_id\s*=\s*(-?\d+)")
+_ID_ATTR_RE = re.compile(r"\bid\s*=\s*(-?\d+)")
 
 
 class IRViewerApp(App):
@@ -162,6 +169,14 @@ class IRViewerApp(App):
         self._tensor_dump_path: Path | None = tensor_dump_path
         self._tensor_dump_index: dict[int, dict[tuple[int, int, int], Path]] = self._build_tensor_dump_index(
             tensor_dump_path
+        )
+        self._tensor_dump_input_index: dict[int, dict[tuple[int, int, int], Path]] = self._build_act_host_dump_index(
+            tensor_dump_path,
+            kind="input",
+        )
+        self._tensor_dump_output_index: dict[int, dict[tuple[int, int, int], Path]] = self._build_act_host_dump_index(
+            tensor_dump_path,
+            kind="output",
         )
         self._tensor_dump_by_line: dict[int, TensorDumpSelection] = {}
         if path is not None and not self._require_file_choice:
@@ -396,7 +411,7 @@ class IRViewerApp(App):
         if selection is None:
             return
         self.push_screen(
-            TensorDumpScreen(entry.node.source_index, selection.kernel_id, selection.files_by_key)
+            TensorDumpScreen(entry.node.source_index, selection.label, selection.files_by_key)
         )
 
     def _collect_attr_options(self) -> list[tuple[str, str | None]]:
@@ -1936,22 +1951,78 @@ class IRViewerApp(App):
             by_kernel.setdefault(kernel, {})[key] = candidate
         return by_kernel
 
+    @staticmethod
+    def _build_act_host_dump_index(
+        tensor_dump_path: Path | None,
+        kind: str,
+    ) -> dict[int, dict[tuple[int, int, int], Path]]:
+        if tensor_dump_path is None:
+            return {}
+        root = tensor_dump_path.expanduser()
+        if not root.exists() or not root.is_dir():
+            return {}
+        by_id: dict[int, dict[tuple[int, int, int], Path]] = {}
+        pattern = _ACT_HOST_INPUT_DUMP_FILE_RE if kind == "input" else _ACT_HOST_OUTPUT_DUMP_FILE_RE
+        for candidate in root.rglob("*.npy"):
+            match = pattern.match(candidate.name)
+            if not match:
+                continue
+            tensor_id = int(match.group("id"))
+            iteration = int(match.group("iteration"))
+            box = int(match.group("box"))
+            key = (tensor_id, iteration, box)
+            by_id.setdefault(tensor_id, {})[key] = candidate
+        return by_id
+
     def _map_tensor_dumps_to_instructions(self) -> dict[int, "TensorDumpSelection"]:
-        if not self._tensor_dump_index:
+        if not self._tensor_dump_index and not self._tensor_dump_input_index and not self._tensor_dump_output_index:
             return {}
         if not self.view.instructions:
             self.view.render()
         mapping: dict[int, TensorDumpSelection] = {}
         for source_index in sorted(self.view.instructions.keys()):
             instruction = self.view.instructions[source_index]
+            if instruction.inst == "ws_rt.acth.declare_input_tensor":
+                tensor_id = self._instruction_id_value(source_index, instruction.attrs)
+                if tensor_id is not None:
+                    files_by_key = self._tensor_dump_input_index.get(tensor_id)
+                    if files_by_key:
+                        mapping[source_index] = TensorDumpSelection(
+                            label=f"input id {tensor_id}",
+                            files_by_key=files_by_key,
+                        )
+                        continue
+            if instruction.inst == "ws_rt.acth.declare_output_tensor":
+                tensor_id = self._instruction_id_value(source_index, instruction.attrs)
+                if tensor_id is not None:
+                    files_by_key = self._tensor_dump_output_index.get(tensor_id)
+                    if files_by_key:
+                        mapping[source_index] = TensorDumpSelection(
+                            label=f"output id {tensor_id}",
+                            files_by_key=files_by_key,
+                        )
+                        continue
             kernel_ids = self._instruction_kernel_ids(source_index, instruction.attrs)
             for kernel_id in kernel_ids:
                 files_by_key = self._tensor_dump_index.get(kernel_id)
                 if not files_by_key:
                     continue
-                mapping[source_index] = TensorDumpSelection(kernel_id=kernel_id, files_by_key=files_by_key)
+                mapping[source_index] = TensorDumpSelection(label=f"kernel {kernel_id}", files_by_key=files_by_key)
                 break
         return mapping
+
+    def _instruction_id_value(self, source_index: int, attrs: str | None) -> int | None:
+        parsed = _parse_attrs_flat(attrs) if attrs else {}
+        raw_id = parsed.get("id")
+        parsed_id = _parse_int_literal(raw_id)
+        if parsed_id is not None:
+            return parsed_id
+        if 0 <= source_index < len(self.document.lines):
+            line = self.document.lines[source_index]
+            match = _ID_ATTR_RE.search(line)
+            if match:
+                return _parse_int_literal(match.group(1))
+        return None
 
     def _instruction_kernel_ids(self, source_index: int, attrs: str | None) -> list[int]:
         values: list[int] = []
@@ -2260,7 +2331,7 @@ class LineEntry:
 
 @dataclass(frozen=True)
 class TensorDumpSelection:
-    kernel_id: int
+    label: str
     files_by_key: dict[tuple[int, int, int], Path]
 
 
@@ -2288,10 +2359,10 @@ class TensorDumpScreen(ModalScreen[None]):
     }
     """
 
-    def __init__(self, source_index: int, kernel_id: int, files_by_key: dict[tuple[int, int, int], Path]) -> None:
+    def __init__(self, source_index: int, label: str, files_by_key: dict[tuple[int, int, int], Path]) -> None:
         super().__init__()
         self.source_index = source_index
-        self.kernel_id = kernel_id
+        self.label = label
         self._rows: list[tuple[int, int, int, Path]] = [
             (operand, iteration, box, path)
             for (operand, iteration, box), path in sorted(files_by_key.items())
@@ -2299,8 +2370,8 @@ class TensorDumpScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="tensor-panel"):
-            yield Label(f"Tensor dump: line {self.source_index + 1}, kernel {self.kernel_id}")
-            yield Label("Choose operand / iter / box")
+            yield Label(f"Tensor dump: line {self.source_index + 1}, {self.label}")
+            yield Label("Choose operand/id / iter / box")
             yield DataTable(id="tensor-table")
             yield RichLog(id="tensor-preview", wrap=True)
             yield Label("↑/↓ to choose; Enter to reload preview; Esc to close")
@@ -2308,7 +2379,7 @@ class TensorDumpScreen(ModalScreen[None]):
     def on_mount(self) -> None:
         table = self.query_one("#tensor-table", DataTable)
         table.clear(columns=True)
-        table.add_columns("operand", "iter", "box", "file")
+        table.add_columns("operand/id", "iter", "box", "file")
         table.cursor_type = "row"
         table.fixed_rows = 0
         for operand, iteration, box, path in self._rows:
