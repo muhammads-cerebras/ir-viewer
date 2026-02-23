@@ -178,6 +178,7 @@ class IRViewerApp(App):
             tensor_dump_path,
             kind="output",
         )
+        self._tensor_repl_sessions: dict[str, TensorReplSession] = {}
         self._tensor_dump_by_line: dict[int, TensorDumpSelection] = {}
         if path is not None and not self._require_file_choice:
             self._load_path(path)
@@ -411,7 +412,12 @@ class IRViewerApp(App):
         if selection is None:
             return
         self.push_screen(
-            TensorDumpScreen(entry.node.source_index, selection.label, selection.files_by_key)
+            TensorDumpScreen(
+                entry.node.source_index,
+                selection.label,
+                selection.files_by_key,
+                repl_sessions=self._tensor_repl_sessions,
+            )
         )
 
     def _collect_attr_options(self) -> list[tuple[str, str | None]]:
@@ -2335,6 +2341,12 @@ class TensorDumpSelection:
     files_by_key: dict[tuple[int, int, int], Path]
 
 
+@dataclass
+class TensorReplSession:
+    commands: list[str]
+    transcript: list[str]
+
+
 class TensorDumpScreen(ModalScreen[None]):
     CSS = """
     TensorDumpScreen {
@@ -2350,19 +2362,59 @@ class TensorDumpScreen(ModalScreen[None]):
     }
 
     #tensor-table {
-        height: 40%;
+        height: 4;
         margin: 0 0 1 0;
     }
 
     #tensor-preview {
         height: 1fr;
     }
+
+    #tensor-repl {
+        margin: 1 0 0 0;
+    }
     """
 
-    def __init__(self, source_index: int, label: str, files_by_key: dict[tuple[int, int, int], Path]) -> None:
+    def __init__(
+        self,
+        source_index: int,
+        label: str,
+        files_by_key: dict[tuple[int, int, int], Path],
+        repl_sessions: dict[str, TensorReplSession] | None = None,
+    ) -> None:
         super().__init__()
         self.source_index = source_index
         self.label = label
+        self._loaded_array = None
+        self._loaded_path: Path | None = None
+        self._safe_builtins: dict[str, object] = {
+            "abs": abs,
+            "all": all,
+            "any": any,
+            "bool": bool,
+            "dict": dict,
+            "enumerate": enumerate,
+            "float": float,
+            "int": int,
+            "len": len,
+            "list": list,
+            "max": max,
+            "min": min,
+            "range": range,
+            "repr": repr,
+            "round": round,
+            "set": set,
+            "sorted": sorted,
+            "str": str,
+            "sum": sum,
+            "tuple": tuple,
+            "zip": zip,
+        }
+        self._show_full_tensor: bool = False
+        self._repl_scope: dict[str, object] = {}
+        self._repl_sessions: dict[str, TensorReplSession] = repl_sessions if repl_sessions is not None else {}
+        self._repl_history: list[str] = []
+        self._repl_history_index: int = len(self._repl_history)
         self._rows: list[tuple[int, int, int, Path]] = [
             (operand, iteration, box, path)
             for (operand, iteration, box), path in sorted(files_by_key.items())
@@ -2374,7 +2426,8 @@ class TensorDumpScreen(ModalScreen[None]):
             yield Label("Choose operand/id / iter / box")
             yield DataTable(id="tensor-table")
             yield RichLog(id="tensor-preview", wrap=True)
-            yield Label("↑/↓ to choose; Enter to reload preview; Esc to close")
+            yield Input(placeholder="REPL (examples: t.shape, np.mean(t), t[0], :info, :full, :summary, :clear, :help)", id="tensor-repl")
+            yield Label("↑/↓ select row • Enter reload row • type REPL + Enter • Esc close")
 
     def on_mount(self) -> None:
         table = self.query_one("#tensor-table", DataTable)
@@ -2387,6 +2440,65 @@ class TensorDumpScreen(ModalScreen[None]):
         if self._rows:
             self._show_row(0)
 
+    def _session_key_for_path(self, path: Path | None) -> str | None:
+        if path is None:
+            return None
+        try:
+            return str(path.resolve())
+        except Exception:
+            return str(path)
+
+    def _current_session(self) -> TensorReplSession | None:
+        key = self._session_key_for_path(self._loaded_path)
+        if key is None:
+            return None
+        session = self._repl_sessions.get(key)
+        if session is None:
+            session = TensorReplSession(commands=[], transcript=[])
+            self._repl_sessions[key] = session
+        return session
+
+    def _append_repl_output(self, text: str, persist: bool = True) -> None:
+        preview = self.query_one("#tensor-preview", RichLog)
+        preview.write(text)
+        if persist:
+            session = self._current_session()
+            if session is not None:
+                session.transcript.append(text)
+
+    def _update_repl_core_scope(self) -> None:
+        t = self._loaded_array
+        self._repl_scope["t"] = t
+        self._repl_scope["tensor"] = t
+        self._repl_scope["path"] = str(self._loaded_path) if self._loaded_path else ""
+        self._repl_scope["shape"] = t.shape if t is not None else None
+        self._repl_scope["dtype"] = t.dtype if t is not None else None
+        self._repl_scope["size"] = t.size if t is not None else None
+
+    def _set_repl_input_from_history(self, input_widget: Input, index: int) -> None:
+        if not self._repl_history:
+            return
+        idx = max(0, min(index, len(self._repl_history)))
+        self._repl_history_index = idx
+        if idx >= len(self._repl_history):
+            input_widget.value = ""
+        else:
+            input_widget.value = self._repl_history[idx]
+        try:
+            input_widget.cursor_position = len(input_widget.value)
+        except Exception:
+            pass
+
+    def _format_array_text(self, np_module: object, array: object) -> str:
+        np = np_module
+        if self._show_full_tensor:
+            with np.printoptions(threshold=np.inf, edgeitems=array.size, linewidth=140):
+                return np.array2string(array, max_line_width=140)
+        text = np.array2string(array, threshold=400, edgeitems=4, max_line_width=140)
+        if len(text) > 20000:
+            text = f"{text[:20000]}\n... <truncated>"
+        return text
+
     def _show_row(self, row_index: int) -> None:
         if row_index < 0 or row_index >= len(self._rows):
             return
@@ -2398,13 +2510,26 @@ class TensorDumpScreen(ModalScreen[None]):
         try:
             import numpy as np
         except Exception:
+            self._loaded_array = None
+            self._loaded_path = None
             preview.write("\nNumPy is not available in the current runtime. Re-run the app using ./ir-viewer so it uses the managed micromamba environment.")
             return
         try:
             array = np.load(path, allow_pickle=False)
         except Exception as exc:
+            self._loaded_array = None
+            self._loaded_path = None
             preview.write(f"\nFailed to load tensor file: {exc}")
             return
+        self._loaded_array = array
+        self._loaded_path = path
+        self._update_repl_core_scope()
+
+        session = self._current_session()
+        if session is not None:
+            self._repl_history = session.commands
+            self._repl_history_index = len(self._repl_history)
+            self._rebuild_repl_scope_from_commands(session.commands)
         preview.write(f"\nshape: {array.shape}")
         preview.write(f"dtype: {array.dtype}")
         if array.size > 0 and np.issubdtype(array.dtype, np.number):
@@ -2412,11 +2537,12 @@ class TensorDumpScreen(ModalScreen[None]):
                 preview.write(f"min/max: {array.min()} / {array.max()}")
             except Exception:
                 pass
-        array_text = np.array2string(array, threshold=400, edgeitems=4, max_line_width=140)
-        if len(array_text) > 20000:
-            array_text = f"{array_text[:20000]}\n... <truncated>"
+        array_text = self._format_array_text(np, array)
         preview.write("")
         preview.write(array_text)
+        if session is not None and session.transcript:
+            for line in session.transcript:
+                preview.write(line)
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         self._show_row(event.cursor_row)
@@ -2424,8 +2550,151 @@ class TensorDumpScreen(ModalScreen[None]):
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         self._show_row(event.cursor_row)
 
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "tensor-repl":
+            return
+        command = event.value.strip()
+        event.input.value = ""
+        event.stop()
+        if not command:
+            return
+        self._run_repl(command)
+
+    def _rebuild_repl_scope_from_commands(self, commands: list[str]) -> None:
+        self._update_repl_core_scope()
+        try:
+            import numpy as np
+        except Exception:
+            return
+        self._repl_scope["np"] = np
+        for command in commands:
+            lower = command.lower()
+            if lower.startswith(":"):
+                continue
+            expr = command[1:].strip() if command.startswith("=") else command
+            try:
+                eval(expr, {"__builtins__": self._safe_builtins}, self._repl_scope)
+            except SyntaxError:
+                try:
+                    exec(command, {"__builtins__": self._safe_builtins}, self._repl_scope)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        if "t" in self._repl_scope and self._repl_scope["t"] is not None:
+            self._loaded_array = self._repl_scope["t"]
+        self._update_repl_core_scope()
+
+    def _run_repl(self, command: str) -> None:
+        lower = command.lower()
+        if lower in {":help", "help"}:
+            self._append_repl_output("\n[REPL] Variables: t (tensor), np (numpy), path, shape, dtype, size")
+            self._append_repl_output("[REPL] Variables persist between commands (e.g. x = t[:, :, 0])")
+            self._append_repl_output("[REPL] History: use ↑/↓ in REPL input")
+            self._append_repl_output("[REPL] Examples: t.shape, np.mean(t), x = t[:, :, 0], x.mean()")
+            self._append_repl_output("[REPL] Commands: :info, :full, :summary, :clear, :reload")
+            return
+        if lower == ":full":
+            self._show_full_tensor = True
+            table = self.query_one("#tensor-table", DataTable)
+            self._show_row(_cursor_row(table.cursor_coordinate))
+            self._append_repl_output("\n[REPL] Full tensor display enabled.")
+            return
+        if lower == ":summary":
+            self._show_full_tensor = False
+            table = self.query_one("#tensor-table", DataTable)
+            self._show_row(_cursor_row(table.cursor_coordinate))
+            self._append_repl_output("\n[REPL] Summary tensor display enabled.")
+            return
+        if lower == ":clear":
+            self.query_one("#tensor-preview", RichLog).clear()
+            session = self._current_session()
+            if session is not None:
+                session.commands.clear()
+                session.transcript.clear()
+            self._repl_history = []
+            self._repl_history_index = 0
+            table = self.query_one("#tensor-table", DataTable)
+            self._show_row(_cursor_row(table.cursor_coordinate))
+            return
+        if lower == ":reload":
+            table = self.query_one("#tensor-table", DataTable)
+            self._show_row(_cursor_row(table.cursor_coordinate))
+            return
+
+        t = self._loaded_array
+        if t is None:
+            self._append_repl_output("\n[REPL] No tensor loaded yet. Select a row first.")
+            return
+
+        try:
+            import numpy as np
+        except Exception:
+            self._append_repl_output("\n[REPL] NumPy not available in current runtime.")
+            return
+
+        self._update_repl_core_scope()
+        self._repl_scope["np"] = np
+        scope = self._repl_scope
+        session = self._current_session()
+        if session is not None:
+            session.commands.append(command)
+            self._repl_history = session.commands
+            self._repl_history_index = len(self._repl_history)
+
+        if lower == ":info":
+            self._append_repl_output(f"\n[REPL] shape={t.shape}, dtype={t.dtype}, size={t.size}")
+            if t.size > 0 and np.issubdtype(t.dtype, np.number):
+                try:
+                    self._append_repl_output(f"[REPL] min/max={t.min()} / {t.max()}")
+                except Exception:
+                    pass
+            return
+
+        expr = command[1:].strip() if command.startswith("=") else command
+        try:
+            result = eval(expr, {"__builtins__": self._safe_builtins}, scope)
+            if isinstance(result, np.ndarray):
+                text = self._format_array_text(np, result)
+            else:
+                text = repr(result)
+            if len(text) > 20000:
+                text = f"{text[:20000]}\n... <truncated>"
+            self._append_repl_output(f"\n>>> {command}")
+            self._append_repl_output(text)
+            return
+        except SyntaxError:
+            pass
+        except Exception as exc:
+            self._append_repl_output(f"\n>>> {command}")
+            self._append_repl_output(f"[REPL error] {exc}")
+            return
+
+        try:
+            exec(command, {"__builtins__": self._safe_builtins}, scope)
+            if "t" in scope and isinstance(scope["t"], np.ndarray):
+                self._loaded_array = scope["t"]
+                self._update_repl_core_scope()
+            self._append_repl_output(f"\n>>> {command}")
+            self._append_repl_output("[REPL] ok")
+        except Exception as exc:
+            self._append_repl_output(f"\n>>> {command}")
+            self._append_repl_output(f"[REPL error] {exc}")
+
     def on_key(self, event: events.Key) -> None:
+        focused = self.app.focused
+        if isinstance(focused, Input) and focused.id == "tensor-repl":
+            if event.key == "up":
+                self._set_repl_input_from_history(focused, self._repl_history_index - 1)
+                event.stop()
+                return
+            if event.key == "down":
+                self._set_repl_input_from_history(focused, self._repl_history_index + 1)
+                event.stop()
+                return
         if event.key == "enter":
+            if isinstance(focused, Input) and focused.id == "tensor-repl":
+                return
             table = self.query_one("#tensor-table", DataTable)
             self._show_row(_cursor_row(table.cursor_coordinate))
             event.stop()
