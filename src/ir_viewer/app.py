@@ -1789,7 +1789,6 @@ class IRViewerApp(App):
     def _apply_search(self, query: str | None) -> None:
         if not query:
             return
-        query = query.strip()
         if query.startswith("/"):
             query = query[1:]
         if not query:
