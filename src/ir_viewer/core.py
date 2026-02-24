@@ -14,6 +14,7 @@ _ALLOC_RE = re.compile(r"^\s*(%\d+)\s*=\s*ws_rt\.cmdh\.waf\.alloc\b(.*)$")
 _LAYOUT_REF_RE = re.compile(r"layout\s*=\s*(#layout\d+)")
 _LOC_REF_RE = re.compile(r"loc\((#loc\d+)\)")
 _SSA_RE = re.compile(r"%[A-Za-z0-9_][A-Za-z0-9_$.]*(?:#\d+)?")
+_WS_RT_PREFIX_RE = re.compile(r"\b(ws_rt\.[A-Za-z0-9_]+)\.")
 
 
 @dataclass(frozen=True)
@@ -246,6 +247,7 @@ class DocumentView:
                 dedup_types,
                 self.document.allocs,
                 node.source_index,
+                instruction.inst,
             )
             if alloc_lines:
                 parts.append("")
@@ -339,6 +341,7 @@ class DocumentView:
                 dedup_types,
                 self.document.allocs,
                 node.source_index,
+                instruction.inst,
             )
             if alloc_lines:
                 parts.append("")
@@ -598,6 +601,56 @@ def _alloc_for_value(
     return best or candidates[-1]
 
 
+def _collect_host_container_by_line(lines: List[str]) -> Dict[int, Optional[str]]:
+    container_by_line: Dict[int, Optional[str]] = {}
+    host_re = re.compile(r"\bws_rt\.host\.(cmd|wgt|act)\b")
+    stack: List[tuple[str, int]] = []
+    depth = 0
+    counter = 0
+    for idx, line in enumerate(lines):
+        match = host_re.search(line)
+        if match:
+            kind = match.group(1)
+            counter += 1
+            start_depth = depth + max(1, _brace_delta(line))
+            stack.append((f"{kind}:{counter}", start_depth))
+        container_by_line[idx] = stack[-1][0] if stack else None
+        depth += _brace_delta(line)
+        while stack and depth < stack[-1][1]:
+            stack.pop()
+    return container_by_line
+
+
+def _alloc_for_value_scoped(
+    allocs: Dict[str, List[AllocInfo]],
+    value: str,
+    line_index: int,
+    lines: List[str],
+    container_by_line: Dict[int, Optional[str]],
+) -> Optional[AllocInfo]:
+    candidates = allocs.get(value)
+    if not candidates:
+        return None
+    line_number = line_index + 1
+    container_id = container_by_line.get(line_index)
+    line_text = lines[line_index] if 0 <= line_index < len(lines) else ""
+    line_prefix_match = _WS_RT_PREFIX_RE.search(line_text)
+    line_prefix = line_prefix_match.group(1) if line_prefix_match else None
+    best_scoped: Optional[AllocInfo] = None
+    for info in candidates:
+        info_index = info.line_number - 1
+        if info.line_number > line_number:
+            break
+        if container_by_line.get(info_index) != container_id:
+            continue
+        alloc_prefix_match = _WS_RT_PREFIX_RE.search(info.text)
+        alloc_prefix = alloc_prefix_match.group(1) if alloc_prefix_match else None
+        if line_prefix and alloc_prefix and line_prefix != alloc_prefix:
+            continue
+        best_scoped = info
+    return best_scoped
+
+
 def _is_scratch_alloc(alloc: Optional[AllocInfo]) -> bool:
     if not alloc:
         return False
@@ -619,6 +672,8 @@ def _compute_ws_rt_io(
     allocs: Dict[str, List[AllocInfo]],
 ) -> Dict[int, tuple[List[str], List[str]]]:
     ws_rt_io: Dict[int, tuple[List[str], List[str]]] = {}
+    container_by_line = _collect_host_container_by_line(lines)
+    known_handle_values: set[str] = set()
     last_def: Dict[str, int] = {}
     last_def_is_cast: Dict[str, bool] = {}
     suballoc_parent_def: Dict[str, int] = {}
@@ -629,6 +684,17 @@ def _compute_ws_rt_io(
         instruction = _parse_instruction_line(line, idx)
         if not instruction:
             continue
+
+        # Track SSA values that represent handles so non-cmdh ops can ignore them.
+        result_values = _expanded_result_values(instruction.results)
+        has_handle_result_type = any("handle" in t for t in instruction.result_types)
+        if not has_handle_result_type and instruction.uniform_type and "handle" in instruction.uniform_type and result_values:
+            has_handle_result_type = True
+        if has_handle_result_type:
+            for value in result_values:
+                if value:
+                    known_handle_values.add(value)
+
         if instruction.inst.startswith("ws_rt."):
             if instruction.inst.startswith("ws_rt.cmdh.waf.alloc"):
                 ws_rt_io[idx] = ([], _operand_values(instruction.operands))
@@ -643,11 +709,54 @@ def _compute_ws_rt_io(
             arg_types = list(instruction.arg_types)
             if instruction.uniform_type and len(arg_types) < len(operands):
                 arg_types = arg_types + [instruction.uniform_type] * (len(operands) - len(arg_types))
-            handle_operands: set[str] = set()
+
+            is_cmdh = instruction.inst.startswith("ws_rt.cmdh.")
+            is_cmdh_waf = instruction.inst.startswith("ws_rt.cmdh.waf")
+            inst_tail = instruction.inst.split(".")[-1]
+            is_txact = inst_tail in {"txact"}
+            is_rxact = inst_tail in {"rxact"}
+
+            typed_handle_operands: set[str] = set()
             for pos, value in enumerate(operands):
                 type_text = arg_types[pos] if pos < len(arg_types) else ""
                 if "handle" in type_text:
-                    handle_operands.add(value)
+                    typed_handle_operands.add(value)
+
+            handle_operands: set[str] = set()
+            ignored_handle_operands: set[str] = set()
+            if is_cmdh and not is_cmdh_waf:
+                handle_operands = typed_handle_operands
+            else:
+                # Handle-typed operands are only meaningful for ws_rt.cmdh (except waf).
+                ignored_handle_operands = typed_handle_operands | {v for v in operands if v in known_handle_values}
+
+            if is_txact:
+                inputs: List[str] = []
+                for value in operands:
+                    if value in ignored_handle_operands:
+                        continue
+                    if value not in inputs:
+                        inputs.append(value)
+                ws_rt_io[idx] = ([], inputs)
+                continue
+
+            if is_rxact:
+                outputs: List[str] = []
+                for value in operands:
+                    if value in handle_operands:
+                        continue
+                    if value in ignored_handle_operands:
+                        continue
+                    alloc = _alloc_for_value_scoped(allocs, value, idx, lines, container_by_line)
+                    if _is_scratch_alloc(alloc):
+                        continue
+                    if value not in outputs:
+                        outputs.append(value)
+                for value in outputs:
+                    last_def[value] = idx
+                    last_def_is_cast[value] = False
+                ws_rt_io[idx] = (outputs, [])
+                continue
 
             segment_sizes = _operand_segment_sizes(instruction.attrs)
             if segment_sizes and len(segment_sizes) >= 2:
@@ -661,7 +770,9 @@ def _compute_ws_rt_io(
                 inputs: List[str] = []
 
                 for value in first_group:
-                    alloc = _alloc_for_value(allocs, value, idx)
+                    if value in ignored_handle_operands:
+                        continue
+                    alloc = _alloc_for_value_scoped(allocs, value, idx, lines, container_by_line)
                     if value in handle_operands or _is_scratch_alloc(alloc):
                         if value not in inputs:
                             inputs.append(value)
@@ -670,6 +781,8 @@ def _compute_ws_rt_io(
                         outputs.append(value)
 
                 for value in second_group + tail_group:
+                    if value in ignored_handle_operands:
+                        continue
                     if value not in inputs:
                         inputs.append(value)
 
@@ -682,6 +795,8 @@ def _compute_ws_rt_io(
 
             counts: Dict[str, int] = {}
             for value in operands:
+                if value in ignored_handle_operands:
+                    continue
                 counts[value] = counts.get(value, 0) + 1
 
             # Common ws_rt.cmdh in-place pattern: first data operand is destination and
@@ -692,7 +807,9 @@ def _compute_ws_rt_io(
             for value in operands:
                 if value in handle_operands:
                     continue
-                alloc = _alloc_for_value(allocs, value, idx)
+                if value in ignored_handle_operands:
+                    continue
+                alloc = _alloc_for_value_scoped(allocs, value, idx, lines, container_by_line)
                 if _is_scratch_alloc(alloc):
                     continue
                 first_data_operand = value
@@ -718,7 +835,9 @@ def _compute_ws_rt_io(
             for value in operands:
                 if value in handle_operands:
                     continue
-                alloc = _alloc_for_value(allocs, value, idx)
+                if value in ignored_handle_operands:
+                    continue
+                alloc = _alloc_for_value_scoped(allocs, value, idx, lines, container_by_line)
                 if _is_scratch_alloc(alloc):
                     continue
                 parent = alloc.parent if alloc else None
@@ -740,12 +859,14 @@ def _compute_ws_rt_io(
             inputs: List[str] = []
             inputs_started = False
             for value in operands:
+                if value in ignored_handle_operands:
+                    continue
                 if value in handle_operands:
                     if value not in inputs:
                         inputs.append(value)
                     inputs_started = True
                     continue
-                alloc = _alloc_for_value(allocs, value, idx)
+                alloc = _alloc_for_value_scoped(allocs, value, idx, lines, container_by_line)
                 if _is_scratch_alloc(alloc):
                     if value not in inputs:
                         inputs.append(value)
@@ -1630,7 +1751,8 @@ def _instruction_label(
         operands_display = f"{operands_display} [{const_value}]".strip()
     if instruction.inst.startswith("ws_rt."):
         outputs, inputs = ws_rt_io.get(line_index, ([], _operand_values(instruction.operands)))
-        handle = instruction.results.strip() if instruction.results else ""
+        show_handle = instruction.inst.startswith("ws_rt.cmdh.") and not instruction.inst.startswith("ws_rt.cmdh.waf")
+        handle = instruction.results.strip() if show_handle and instruction.results else ""
         output_types = instruction.arg_types[: len(outputs)] if instruction.arg_types else []
         input_types = instruction.arg_types[len(outputs) :] if instruction.arg_types else []
         if instruction.uniform_type:
@@ -1638,11 +1760,53 @@ def _instruction_label(
                 output_types = output_types + [instruction.uniform_type] * (len(outputs) - len(output_types))
             if len(input_types) < len(inputs):
                 input_types = input_types + [instruction.uniform_type] * (len(inputs) - len(input_types))
+        if not show_handle:
+            filtered_outputs: List[str] = []
+            filtered_output_types: List[str] = []
+            for idx, value in enumerate(outputs):
+                type_text = output_types[idx] if idx < len(output_types) else ""
+                if "handle" in type_text:
+                    continue
+                filtered_outputs.append(value)
+                if idx < len(output_types):
+                    filtered_output_types.append(type_text)
+            outputs = filtered_outputs
+            output_types = filtered_output_types
+
+            filtered_inputs: List[str] = []
+            filtered_input_types: List[str] = []
+            for idx, value in enumerate(inputs):
+                type_text = input_types[idx] if idx < len(input_types) else ""
+                if "handle" in type_text:
+                    continue
+                filtered_inputs.append(value)
+                if idx < len(input_types):
+                    filtered_input_types.append(type_text)
+            inputs = filtered_inputs
+            input_types = filtered_input_types
         typed_outputs = ", ".join(
-            _format_typed_values(outputs, output_types, allocs, line_index, show_alloc_sizes, show_types, is_arg=False)
+            _format_typed_values(
+                outputs,
+                output_types,
+                allocs,
+                line_index,
+                show_alloc_sizes,
+                show_types,
+                is_arg=False,
+                instruction_inst=instruction.inst,
+            )
         )
         typed_inputs = ", ".join(
-            _format_typed_values(inputs, input_types, allocs, line_index, show_alloc_sizes, show_types, is_arg=True)
+            _format_typed_values(
+                inputs,
+                input_types,
+                allocs,
+                line_index,
+                show_alloc_sizes,
+                show_types,
+                is_arg=True,
+                instruction_inst=instruction.inst,
+            )
         )
         if const_value:
             typed_inputs = f"{typed_inputs} [{const_value}]".strip()
@@ -1666,10 +1830,28 @@ def _instruction_label(
             if len(arg_types) < len(operands):
                 arg_types = arg_types + [instruction.uniform_type] * (len(operands) - len(arg_types))
         typed_results = ", ".join(
-            _format_typed_values(results, result_types, allocs, line_index, show_alloc_sizes, show_types, is_arg=False)
+            _format_typed_values(
+                results,
+                result_types,
+                allocs,
+                line_index,
+                show_alloc_sizes,
+                show_types,
+                is_arg=False,
+                instruction_inst=instruction.inst,
+            )
         )
         typed_operands = ", ".join(
-            _format_typed_values(operands, arg_types, allocs, line_index, show_alloc_sizes, show_types, is_arg=True)
+            _format_typed_values(
+                operands,
+                arg_types,
+                allocs,
+                line_index,
+                show_alloc_sizes,
+                show_types,
+                is_arg=True,
+                instruction_inst=instruction.inst,
+            )
         )
         rhs = inst_name
         if typed_operands:
@@ -1687,12 +1869,15 @@ def _format_alloc_table(
     types: List[str],
     allocs: Dict[str, List[AllocInfo]],
     line_index: int,
+    instruction_inst: Optional[str] = None,
 ) -> List[str]:
     rows: List[tuple[str, str, str, str, str, str]] = []
     for idx, value in enumerate(values):
         if not value:
             continue
         alloc = _alloc_for_value(allocs, value, line_index)
+        if alloc and not _is_alloc_prefix_compatible(instruction_inst, alloc.text):
+            alloc = None
         suffix = ""
         if alloc:
             suffix = _alloc_suffix(alloc.extras)
@@ -2329,6 +2514,26 @@ def _short_type(type_text: Optional[str]) -> Optional[str]:
     return type_text
 
 
+def _instruction_prefix(inst: Optional[str]) -> Optional[str]:
+    if not inst:
+        return None
+    match = _WS_RT_PREFIX_RE.search(inst)
+    return match.group(1) if match else None
+
+
+def _alloc_prefix_from_text(text: str) -> Optional[str]:
+    match = _WS_RT_PREFIX_RE.search(text)
+    return match.group(1) if match else None
+
+
+def _is_alloc_prefix_compatible(instruction_inst: Optional[str], alloc_text: str) -> bool:
+    inst_prefix = _instruction_prefix(instruction_inst)
+    alloc_prefix = _alloc_prefix_from_text(alloc_text)
+    if inst_prefix is None or alloc_prefix is None:
+        return True
+    return inst_prefix == alloc_prefix
+
+
 def _format_typed_value(
     value: str,
     type_text: Optional[str],
@@ -2337,11 +2542,14 @@ def _format_typed_value(
     show_alloc_sizes: bool,
     show_types: bool,
     is_arg: bool,
+    instruction_inst: Optional[str] = None,
 ) -> str:
     if not value:
         return value
     if type_text == "!ws_rt.prefetch_handle":
         alloc = _alloc_for_value(allocs, value, line_index)
+        if alloc and not _is_alloc_prefix_compatible(instruction_inst, alloc.text):
+            alloc = None
         suffix = ".handle"
         size_text = ""
         if show_alloc_sizes and alloc and alloc.bytes:
@@ -2349,6 +2557,8 @@ def _format_typed_value(
         return f"{_value_with_parent(value, alloc)}{suffix}{size_text}"
     short = _short_type(type_text)
     alloc = _alloc_for_value(allocs, value, line_index)
+    if alloc and not _is_alloc_prefix_compatible(instruction_inst, alloc.text):
+        alloc = None
     suffix = ""
     if alloc:
         if is_arg:
@@ -2374,12 +2584,22 @@ def _format_typed_values(
     show_alloc_sizes: bool,
     show_types: bool,
     is_arg: bool = False,
+    instruction_inst: Optional[str] = None,
 ) -> List[str]:
     typed: List[str] = []
     for idx, value in enumerate(values):
         type_text = types[idx] if idx < len(types) else None
         typed.append(
-            _format_typed_value(value, type_text, allocs, line_index, show_alloc_sizes, show_types, is_arg)
+            _format_typed_value(
+                value,
+                type_text,
+                allocs,
+                line_index,
+                show_alloc_sizes,
+                show_types,
+                is_arg,
+                instruction_inst=instruction_inst,
+            )
         )
     return typed
 

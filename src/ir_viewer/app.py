@@ -24,7 +24,6 @@ from .core import (
     _split_values,
     _expanded_result_values,
     _operand_values,
-    _alloc_for_value,
     _brace_delta,
     _split_top_level,
     _strip_type_annotations,
@@ -42,6 +41,7 @@ _ALLOC_SUFFIX_RE = re.compile(r"%[A-Za-z0-9_$.]+\.[A-Za-z0-9_.-]+")
 _SIZE_RE = re.compile(r"\(\d+\)")
 _SOURCE_VARS_RE = re.compile(r"⟨[^⟩]*⟩")
 _LOC_REF_RE = re.compile(r"loc\((#loc\d+)\)")
+_WS_RT_PREFIX_RE = re.compile(r"\b(ws_rt\.[A-Za-z0-9_]+)\.")
 _TENSOR_DUMP_FILE_RE = re.compile(
     r"^rt_dump_wse_kernel(?P<kernel>\d+)_operand(?P<operand>\d+)_iter(?P<iteration>\d+)_box(?P<box>\d+)\.npy$"
 )
@@ -591,7 +591,7 @@ class IRViewerApp(App):
             return text
 
         for value in uses:
-            alloc = _alloc_for_value(self.document.allocs, value, line_idx)
+            alloc = self._alloc_for_value_scoped(value, line_idx)
             parent = alloc.parent if alloc and alloc.parent else None
             key = parent or value
             def_line = self._lookup_def_line(key, line_idx, container_id, exclude_current=True)
@@ -2116,7 +2116,7 @@ class IRViewerApp(App):
             if instruction.inst.startswith("ws_rt."):
                 if instruction.inst.startswith("ws_rt.cmdh.waf.alloc"):
                     for value in _operand_values(instruction.operands):
-                        alloc = _alloc_for_value(self.document.allocs, value, line_idx)
+                        alloc = self._alloc_for_value_scoped(value, line_idx)
                         parent = alloc.parent if alloc else None
                         key = parent or value
                         prev_def = last_def.get(key)
@@ -2128,7 +2128,7 @@ class IRViewerApp(App):
                     continue
                 outputs, inputs = self.view.ws_rt_io.get(line_idx, ([], []))
                 for value in inputs:
-                    alloc = _alloc_for_value(self.document.allocs, value, line_idx)
+                    alloc = self._alloc_for_value_scoped(value, line_idx)
                     parent = alloc.parent if alloc else None
                     key = parent or value
                     prev_def = last_def.get(key)
@@ -2146,7 +2146,7 @@ class IRViewerApp(App):
                 defs = _expanded_result_values(instruction.results)
                 uses = _operand_values(instruction.operands)
                 for value in uses:
-                    alloc = _alloc_for_value(self.document.allocs, value, line_idx)
+                    alloc = self._alloc_for_value_scoped(value, line_idx)
                     parent = alloc.parent if alloc else None
                     key = parent or value
                     prev_def = last_def.get(key)
@@ -2167,6 +2167,29 @@ class IRViewerApp(App):
             self.use_map[value].sort()
         for def_line in self.use_by_def:
             self.use_by_def[def_line].sort()
+
+    def _alloc_for_value_scoped(self, value: str, line_idx: int):
+        candidates = self.document.allocs.get(value)
+        if not candidates:
+            return None
+        line_number = line_idx + 1
+        container_id = self._container_by_line.get(line_idx)
+        line_text = self.document.lines[line_idx] if 0 <= line_idx < len(self.document.lines) else ""
+        line_prefix_match = _WS_RT_PREFIX_RE.search(line_text)
+        line_prefix = line_prefix_match.group(1) if line_prefix_match else None
+        best = None
+        for info in candidates:
+            if info.line_number > line_number:
+                break
+            info_container = self._container_by_line.get(info.line_number - 1)
+            if info_container != container_id:
+                continue
+            alloc_prefix_match = _WS_RT_PREFIX_RE.search(info.text)
+            alloc_prefix = alloc_prefix_match.group(1) if alloc_prefix_match else None
+            if line_prefix and alloc_prefix and line_prefix != alloc_prefix:
+                continue
+            best = info
+        return best
 
     def _instruction_defs_uses(self, instruction) -> tuple[list[str], list[str]]:
         uses = _operand_values(instruction.operands)
@@ -2228,7 +2251,7 @@ class IRViewerApp(App):
         level1_up: set[int] = set()
         level1_down: set[int] = set()
         for value in uses:
-            alloc = _alloc_for_value(self.document.allocs, value, node.source_index)
+            alloc = self._alloc_for_value_scoped(value, node.source_index)
             key = alloc.parent if alloc and alloc.parent else value
             def_line = self._lookup_def_line(
                 key,
@@ -2250,7 +2273,7 @@ class IRViewerApp(App):
             _, uses2 = self._instruction_defs_uses(inst)
             line_container = self._container_by_line.get(line_idx)
             for value in uses2:
-                alloc = _alloc_for_value(self.document.allocs, value, line_idx)
+                alloc = self._alloc_for_value_scoped(value, line_idx)
                 key = alloc.parent if alloc and alloc.parent else value
                 def_line = self._lookup_def_line(
                     key,
@@ -2280,7 +2303,7 @@ class IRViewerApp(App):
             _, uses3 = self._instruction_defs_uses(inst)
             line_container = self._container_by_line.get(line_idx)
             for value in uses3:
-                alloc = _alloc_for_value(self.document.allocs, value, line_idx)
+                alloc = self._alloc_for_value_scoped(value, line_idx)
                 key = alloc.parent if alloc and alloc.parent else value
                 def_line = self._lookup_def_line(
                     key,
