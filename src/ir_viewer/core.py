@@ -1242,6 +1242,19 @@ def _op_attr_value(attrs: Optional[str]) -> Optional[str]:
     return value or None
 
 
+def _slave_send_type_attr_value(attrs: Optional[str]) -> Optional[str]:
+    if not attrs:
+        return None
+    match = re.search(r"\bslave_send_type\b\s*=\s*([^,}]+)", attrs)
+    if not match:
+        return None
+    value = match.group(1).strip()
+    value = _strip_type_annotations(value)
+    if value.startswith('"') and value.endswith('"') and len(value) >= 2:
+        value = value[1:-1]
+    return value or None
+
+
 def _split_top_level(text: str, sep: str) -> List[str]:
     parts: List[str] = []
     buf: List[str] = []
@@ -1712,6 +1725,9 @@ def _instruction_label(
     op_suffix = _op_attr_value(instruction.attrs)
     if op_suffix:
         inst_name = f"{inst_name}.{op_suffix}"
+    slave_send_type = _slave_send_type_attr_value(instruction.attrs)
+    if slave_send_type:
+        inst_name = f"{inst_name}.{slave_send_type}"
     if not options.show_full_prefix and inst_name.startswith(options.shorten_prefix):
         inst_name = inst_name[len(options.shorten_prefix) :]
     if not options.show_full_prefix:

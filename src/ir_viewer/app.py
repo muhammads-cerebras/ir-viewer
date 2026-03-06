@@ -28,6 +28,7 @@ from .core import (
     _split_top_level,
     _strip_type_annotations,
     _op_attr_value,
+    _slave_send_type_attr_value,
     _semaphore_value,
     _num_rx_value,
     _instruction_label,
@@ -1092,11 +1093,25 @@ class IRViewerApp(App):
         if kind == "inst" and source_index is not None:
             instruction = self.view.instructions.get(source_index)
             if instruction:
-                inst_name = instruction.inst
+                base_inst_name = instruction.inst
+                inst_name = base_inst_name
+                op_suffix = _op_attr_value(instruction.attrs)
+                if op_suffix:
+                    inst_name = f"{inst_name}.{op_suffix}"
+                slave_send_type = _slave_send_type_attr_value(instruction.attrs)
+                if slave_send_type:
+                    inst_name = f"{inst_name}.{slave_send_type}"
+                display_base_inst_name = base_inst_name
                 if not self.options.show_full_prefix and inst_name.startswith(self.options.shorten_prefix):
                     inst_name = inst_name[len(self.options.shorten_prefix) :]
+                if (
+                    not self.options.show_full_prefix
+                    and display_base_inst_name.startswith(self.options.shorten_prefix)
+                ):
+                    display_base_inst_name = display_base_inst_name[len(self.options.shorten_prefix) :]
                 if not self.options.show_full_prefix:
                     inst_name = re.sub(r"\bmaster_(tx|rx)\b", r"\1", inst_name)
+                    display_base_inst_name = re.sub(r"\bmaster_(tx|rx)\b", r"\1", display_base_inst_name)
                 if instruction.attrs:
                     for match in re.finditer(r"\bonX\b", label_string):
                         label_text.stylize("green", match.start(), match.end())
@@ -1104,7 +1119,22 @@ class IRViewerApp(App):
                         label_text.stylize("yellow", match.start(), match.end())
                 idx = label_string.find(inst_name)
                 if idx != -1:
-                    label_text.stylize("bold cyan", idx, idx + len(inst_name))
+                    base_end = idx + len(display_base_inst_name)
+                    label_text.stylize("bold cyan", idx, base_end)
+                    if op_suffix:
+                        op_token = f".{op_suffix}"
+                        op_start = base_end
+                        op_idx = label_string.find(op_token, op_start, idx + len(inst_name))
+                        if op_idx != -1:
+                            label_text.stylize("gray", op_idx, op_idx + len(op_token))
+                    if slave_send_type:
+                        suffix = f".{slave_send_type}"
+                        suffix_search_start = base_end
+                        if op_suffix:
+                            suffix_search_start = base_end + len(f".{op_suffix}")
+                        suffix_idx = label_string.find(suffix, suffix_search_start, idx + len(inst_name))
+                        if suffix_idx != -1:
+                            label_text.stylize("yellow", suffix_idx, suffix_idx + len(suffix))
                 handle_match = re.search(r"\[[^\]]+\]", label_string)
                 if handle_match:
                     label_text.stylize("grey62", handle_match.start(), handle_match.end())
